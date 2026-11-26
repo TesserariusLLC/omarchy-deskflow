@@ -1,0 +1,742 @@
+#!/bin/bash
+# deskflowctl: the one place the Deskflow plugin touches the system.
+# The QML never edits files or runs ddcutil/hyprctl itself; it calls this.
+#
+#   deskflowctl state                     JSON for the bar widget
+#   deskflowctl on|off|toggle|status      the Deskflow service
+#   deskflowctl autostart on|off|status   start at login
+#   deskflowctl role server|client        which side this computer plays
+#   deskflowctl name <computer-name>      the name other computers see
+#   deskflowctl server-host <host>        (client) the server to connect to
+#   deskflowctl doctor                    JSON setup checklist
+#   deskflowctl cert                      create the TLS certificate if missing
+#   deskflowctl unit                      install the systemd user unit
+#   deskflowctl monitors                  JSON: monitors, input switching, known computers
+#   deskflowctl ddc-probe <serial>        JSON: inputs a monitor offers (DDC/CI)
+#   deskflowctl ddc-set <key> <desktop-code> <other-code|none>
+#   deskflowctl apply <layout-json> [--dry-run]
+#   deskflowctl preset list|apply <id>|save <layout-json>|delete <id>|reapply [--hypr-only]
+#   deskflowctl fetch-server-fingerprint <host>   (client)
+#   deskflowctl trust-server <fingerprint>        (client)
+#   deskflowctl pair                      (server) wait for an untrusted computer, print its fingerprint
+#   deskflowctl trust-client <fingerprint>        (server)
+#   deskflowctl watch                     connect/disconnect notifications (run by the plugin)
+#   deskflowctl migrate-v1 <old-presets.json>     convert the pre-1.0 presets file
+#   deskflowctl uninstall                 remove the unit (keeps your settings)
+set -u
+export LC_ALL=C
+
+unit=omarchy-deskflow.service
+port=24800
+cfg_home=${XDG_CONFIG_HOME:-$HOME/.config}
+cfg_dir=$cfg_home/omarchy-deskflow
+presets_file=$cfg_dir/presets.json
+links_file=$cfg_dir/deskflow-server.conf
+df_dir=$cfg_home/Deskflow
+df_conf=$df_dir/Deskflow.conf
+tls_dir=$df_dir/tls
+cert=$tls_dir/deskflow.pem
+state_dir=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-deskflow
+unit_file=$cfg_home/systemd/user/$unit
+
+die() { echo "$*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# ---------------------------------------------------------------- Deskflow.conf (Qt INI)
+ini_get() { # section key
+  [ -r "$df_conf" ] || return 0
+  awk -v s="[$1]" -v k="$2" '
+    /^\[.*\]$/ {in_s = ($0 == s); next}
+    in_s { i = index($0, "="); if (i && substr($0, 1, i-1) == k) { print substr($0, i+1); exit } }
+  ' "$df_conf"
+}
+ini_set() { # section key value
+  mkdir -p "$df_dir"
+  [ -e "$df_conf" ] || : > "$df_conf"
+  local tmp; tmp=$(mktemp "$df_conf.XXXXXX") || return 1
+  awk -v s="[$1]" -v k="$2" -v v="$3" '
+    function emit() { if (!done) { print k "=" v; done = 1 } }
+    /^\[.*\]$/ { if (in_s) emit(); in_s = ($0 == s); seen = seen || in_s; print; next }
+    in_s { i = index($0, "="); if (i && substr($0, 1, i-1) == k) { emit(); next } }
+    { print }
+    END { if (in_s) emit(); else if (!seen) { print ""; print s; print k "=" v } }
+  ' "$df_conf" > "$tmp" && mv -f "$tmp" "$df_conf"
+}
+
+role() { case "$(ini_get core coreMode)" in 2) echo server ;; 1) echo client ;; *) echo none ;; esac; }
+computer_name() { local n; n=$(ini_get core computerName); [ -n "$n" ] && printf '%s' "$n" || hostname; }
+server_host() { ini_get client remoteHost; }
+
+# ---------------------------------------------------------------- service
+running() { systemctl --user is-active --quiet "$unit"; }
+enabled() { systemctl --user is-enabled --quiet "$unit" 2>/dev/null; }
+
+write_unit() {
+  local r; r=$(role); [ "$r" = none ] && r=server
+  mkdir -p "${unit_file%/*}"
+  local cond=""   # a client without a server address has nothing to start
+  [ "$r" = client ] && cond="ExecCondition=/usr/bin/grep -q \"^remoteHost=.\" \"$df_conf\""$'\n'"ExecCondition=/bin/sh -c 'busctl --user introspect org.freedesktop.portal.Desktop /org/freedesktop/portal/desktop | grep -q portal.RemoteDesktop'"$'\n'
+  local tmp; tmp=$(mktemp "$unit_file.XXXXXX") || return 1
+  cat > "$tmp" <<EOF
+# Written by the tesserarius.deskflow Omarchy plugin (deskflowctl unit).
+[Unit]
+Description=Deskflow $r (keyboard and mouse sharing)
+Documentation=man:deskflow-core(1)
+PartOf=graphical-session.target
+After=graphical-session.target network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+${cond}ExecStart=/usr/bin/deskflow-core $r
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target
+EOF
+  if cmp -s "$tmp" "$unit_file"; then rm -f "$tmp"; return 0; fi
+  mv -f "$tmp" "$unit_file"
+  systemctl --user daemon-reload
+  if running; then systemctl --user restart "$unit"; fi
+}
+start() {
+  client_blocked && die "This desktop can't be a Deskflow client: its portal has no RemoteDesktop support."
+  [ -f "$unit_file" ] || write_unit
+  # A core started by the Deskflow window would hold the port; hand over to the service.
+  pkill -x deskflow-core 2>/dev/null && sleep 0.5
+  systemctl --user start "$unit"
+}
+stop() {
+  systemctl --user stop "$unit"
+  pkill -x deskflow-core 2>/dev/null || true
+}
+restart_if_running() { if running; then systemctl --user restart "$unit"; fi; }
+
+# ---------------------------------------------------------------- network facts
+lan_ip() {
+  local ip
+  # First global IPv4 on a physical NIC: skips VPN, Tailscale, Docker and bridges.
+  ip=$(ip -4 -o addr show scope global 2>/dev/null | awk '$2 !~ /^(nordlynx|tun|tap|wg|tailscale|docker|br-|veth|virbr|lo|zt)/ {sub(/\/.*/, "", $4); print $4; exit}')
+  [ -n "$ip" ] || ip=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p')
+  printf '%s' "$ip"
+}
+lan_cidr() {
+  ip -4 -o addr show scope global 2>/dev/null | awk '$2 !~ /^(nordlynx|tun|tap|wg|tailscale|docker|br-|veth|virbr|lo|zt)/ {print $4; exit}' \
+    | awk -F'[./]' 'NF==5 { m=$5; split($1" "$2" "$3" "$4, o, " "); ipn=((o[1]*256+o[2])*256+o[3])*256+o[4]; bs=2^(32-m); n=int(ipn/bs)*bs;
+        printf "%d.%d.%d.%d/%d\n", int(n/16777216)%256, int(n/65536)%256, int(n/256)%256, n%256, m }'
+}
+# Peers of this computer's Deskflow connection: as server, who dialled in; as client, the server.
+peers() {
+  if [ "$(role)" = client ]; then
+    ss -Htn state established "( dport = :$port )" 2>/dev/null | awk '{print $4}'
+  else
+    ss -Htn state established "( sport = :$port )" 2>/dev/null | awk '{print $4}'
+  fi | sed 's/:[0-9]*$//; s/^\[//; s/\]$//' | sort -u
+}
+fingerprint() { [ -r "$cert" ] && openssl x509 -in "$cert" -noout -fingerprint -sha256 2>/dev/null | sed 's/.*=//'; }
+
+# ---------------------------------------------------------------- presets file
+ensure_presets() {
+  mkdir -p "$cfg_dir"
+  [ -s "$presets_file" ] && return 0
+  printf '%s\n' '{"version":2,"options":{"relativeMouseMoves":"true"},"ddc":{},"computers":{},"presets":[]}' > "$presets_file"
+}
+write_presets() { # stdin -> presets file, validated
+  local tmp; tmp=$(mktemp "$presets_file.XXXXXX") || return 1
+  cat > "$tmp"
+  if jq -e '.version == 2 and (.presets | type) == "array"' "$tmp" >/dev/null 2>&1; then
+    mv -f "$tmp" "$presets_file"
+  else rm -f "$tmp"; die "refusing to write an invalid presets file"; fi
+}
+current_preset() { cat "$state_dir/preset" 2>/dev/null; }
+
+# ---------------------------------------------------------------- monitors
+lua_config() { [ -f "$cfg_home/hypr/hyprland.lua" ]; }
+
+# Hyprland's monitors, with a stable key (serial, else make+model+port), logical size,
+# and the last-seen mode remembered for monitors that are switched off right now.
+outputs_json() {
+  mkdir -p "$state_dir"
+  local live cache="$state_dir/outputs.json"
+  live=$(hyprctl monitors all -j 2>/dev/null) || live='[]'
+  [ -s "$cache" ] || echo '{}' > "$cache"
+  jq -c --slurpfile cache "$cache" '
+    def key: if (.serial // "") != "" then .serial else "\(.make) \(.model) \(.name)" end;
+    def swap: (.transform // 0) % 2 == 1;
+    [ .[] | . as $m | ($cache[0][key] // {}) as $c
+      | (if .disabled and (.width // 0) == 0 then $c else . end) as $g
+      | {
+          key: key, output: .name, make, model, serial: (.serial // ""),
+          label: ((.description // "") | if . == "" then "\($m.make) \($m.model)" else . end),
+          width: ($g.width // 1920), height: ($g.height // 1080),
+          refresh: (($g.refreshRate // 60) * 1000 | round / 1000),
+          scale: ($g.scale // 1), transform: ($g.transform // 0),
+          x, y, disabled: (.disabled // false)
+        }
+      | .lw = ((if (.transform % 2) == 1 then .height else .width end) / .scale | round)
+      | .lh = ((if (.transform % 2) == 1 then .width else .height end) / .scale | round)
+    ]' <<<"$live" > "$state_dir/outputs.now" || echo '[]' > "$state_dir/outputs.now"
+  # Remember geometry of every enabled monitor for when it is off.
+  jq -c --slurpfile now "$state_dir/outputs.now" '
+    . + ([ $now[0][] | select(.disabled | not) | {key: .key, value: {width, height, refreshRate: .refresh, scale, transform}} ] | from_entries)
+  ' "$cache" > "$cache.tmp" 2>/dev/null && mv -f "$cache.tmp" "$cache"
+  cat "$state_dir/outputs.now"
+}
+
+# Client screen sizes the server has seen, from Deskflow's own log (only logged at Debug level).
+seen_computers() {
+  journalctl --user -u "$unit" -u deskflow-server.service --since -30d -o cat --no-pager 2>/dev/null \
+    | sed -n 's/.*received client "\([^"]*\)" info shape=[-0-9]*,[-0-9]* \([0-9]*\)x\([0-9]*\).*/\1 \2 \3/p' \
+    | awk '{ last[$1] = $2 " " $3 } END { for (n in last) print n, last[n] }' \
+    | jq -Rnc '[inputs | split(" ") | select(length == 3) | {name: .[0], width: (.[1] | tonumber), height: (.[2] | tonumber)}]'
+}
+
+# The live links file as [{from, dir, to}] (ranges dropped).
+links_list() {
+  awk '
+    /^[[:space:]]*section:[[:space:]]*links/ {inl=1; next}
+    inl && /^[[:space:]]*end[[:space:]]*$/ {inl=0}
+    inl && /^[[:space:]]*[^=]+:[[:space:]]*$/ {cur=$0; gsub(/[[:space:]:]/,"",cur); next}
+    inl && cur!="" && /=/ {split($0,kv,"="); d=kv[1]; v=kv[2]; gsub(/[[:space:]]|\(.*\)/,"",d); gsub(/[[:space:]]|\(.*\)/,"",v); print cur"\t"d"\t"v}
+  ' "$links_file" 2>/dev/null | jq -Rnc '[inputs | split("\t") | select(length == 3) | {from: .[0], dir: .[1], to: .[2]}]'
+}
+
+monitors_cmd() {
+  ensure_presets
+  local outs seen
+  outs=$(outputs_json)
+  seen=$(seen_computers 2>/dev/null); [ -n "$seen" ] || seen='[]'
+  jq -c --argjson outs "$outs" --argjson seen "$seen" --arg name "$(computer_name)" --arg role "$(role)" \
+        --argjson links "$(links_list)" \
+        --arg current "$(current_preset)" --argjson ddc "$(have ddcutil && echo true || echo false)" '
+    { name: $name, role: $role, current: $current, ddcAvailable: $ddc,
+      outputs: $outs, ddc: (.ddc // {}),
+      computers: ( (.computers // {}) as $known
+        | ([ $seen[] | {key: .name, value: {width, height, seen: true}} ] | from_entries) as $s
+        | ($s * $known) | to_entries | map({name: .key} + .value) ),
+      links: $links, presets: .presets }
+  ' "$presets_file"
+}
+
+# ---------------------------------------------------------------- DDC/CI
+ddc_probe() { # serial -> {"current": "0x0f", "inputs": [{"code","label"}]}
+  local sn="$1" caps cur
+  have ddcutil || die "ddcutil is not installed"
+  caps=$(ddcutil --sn "$sn" capabilities 2>/dev/null) || die "ddcutil could not read monitor $sn (is i2c-dev loaded?)"
+  cur=$(ddcutil --sn "$sn" getvcp 60 --terse 2>/dev/null | awk '{print $4}' | sed 's/^x/0x/')
+  awk '
+    /Feature: 60/ {f=1; next}
+    f && /Feature:/ {f=0}
+    f && /^[[:space:]]+[0-9a-fA-F][0-9a-fA-F]:/ { c=$1; sub(":", "", c); $1=""; sub(/^ /, ""); print "0x" tolower(c) "\t" $0 }
+  ' <<<"$caps" | jq -Rnc --arg cur "${cur:-}" '{current: $cur, inputs: [inputs | split("\t") | {code: .[0], label: .[1]}]}'
+}
+ddc_set() { # key desktop other
+  ensure_presets
+  [[ "$2" =~ ^0x[0-9a-fA-F]{1,2}$ ]] || die "desktop input must look like 0x0f"
+  [[ "$3" =~ ^(0x[0-9a-fA-F]{1,2}|none)$ ]] || die "other input must look like 0x11, or none"
+  jq --arg k "$1" --arg d "$2" --arg o "$3" '
+    if $o == "none" then .ddc[$k] = {desktop: $d} else .ddc[$k] = {desktop: $d, other: $o} end
+  ' "$presets_file" | write_presets
+}
+ddc_switch() { # serial code
+  [ -n "$1" ] && [ -n "$2" ] && [ "$2" != null ] || return 0
+  if [ -n "$dry" ]; then echo "+ ddcutil --sn $1 setvcp 60 $2" >&2; return 0; fi
+  # One at a time: parallel ddcutil runs fight over the i2c bus lock.
+  ddcutil --sn "$1" setvcp 60 "$2" --noverify >/dev/null 2>&1 || echo "ddcutil: could not switch $1 to $2" >&2
+}
+
+# ---------------------------------------------------------------- applying a layout
+# A layout (what the window sends and what a preset holds):
+#   monitors: [{key, output, x, y, enabled, handoff}]   this computer's monitors
+#   screens:  [{name, x, y, width, height}]             other computers, same coordinates
+#   links:    [{from, dir, range:[a,b], to, toRange:[c,d]}]
+hypr_monitor() { # output mode x y scale transform | output --off
+  if [ "$2" = --off ]; then
+    if lua_config; then set -- hyprctl eval "hl.monitor({ output = \"$1\", disabled = true })"
+    else set -- hyprctl keyword monitor "$1,disable"; fi
+  else
+    if lua_config; then set -- hyprctl eval "hl.monitor({ output = \"$1\", mode = \"$2\", position = \"${3}x${4}\", scale = $5, transform = $6, disabled = false })"
+    else set -- hyprctl keyword monitor "$1,$2,${3}x${4},$5,transform,$6"; fi
+  fi
+  if [ -n "$dry" ]; then { printf '+'; printf ' %q' "$@"; echo; } >&2; else "$@" >/dev/null; fi
+}
+
+render_links() { # layout json -> deskflow-server.conf text
+  jq -r --slurpfile p "$presets_file" '
+    def rng($r): if $r == null or $r == [0,100] then "" else "(\($r[0]),\($r[1]))" end;
+    def clean: gsub("[^A-Za-z0-9._-]"; "");
+    (.links // []) as $l
+    | ([$l[] | .from] | unique) as $from
+    | "section: links",
+      ( $from[] as $f | "\t\($f | clean):",
+        ( $l[] | select(.from == $f) | "\t\t\(.dir)\(rng(.range)) = \(.to | clean)\(rng(.toRange))" ) ),
+      "end",
+      ( ($p[0].options // {}) | select(length > 0)
+        | "", "section: options", (to_entries[] | "\t\(.key | clean) = \(.value | tostring | clean)"), "end" )
+  ' <<<"$1"
+}
+
+valid_layout() {
+  jq -e '
+    def num: type == "number";
+    (.monitors | type) == "array" and (.monitors | length) <= 16
+    and all(.monitors[]; (.output | type) == "string" and (.output | test("^[A-Za-z0-9._-]{1,32}$"))
+                          and (.x | num) and (.y | num))
+    and ((.screens // []) | type) == "array"
+    and all((.screens // [])[]; (.name | test("^[A-Za-z0-9._-]{1,64}$")))
+    and all((.links // [])[]; (.dir | test("^(left|right|up|down)$"))
+                               and (.from | test("^[A-Za-z0-9._-]{1,64}$")) and (.to | test("^[A-Za-z0-9._-]{1,64}$")))
+  ' >/dev/null 2>&1 <<<"$1"
+}
+
+apply_layout() { # layout-json [hypr-only]
+  local layout="$1" hypr_only="${2:-}" outs m out key mode x y scale tr sn code
+  valid_layout "$layout" || die "invalid layout"
+  ensure_presets
+  outs=$(outputs_json)
+  # Match each monitor in the layout to a live output by key (serial), so moving a
+  # cable to another port does not break a preset; fall back to the port name.
+  local plan
+  plan=$(jq -c --argjson outs "$outs" --slurpfile p "$presets_file" '
+    [ .monitors[] as $m
+      | ($outs | map(select(.key == $m.key)) | first // ($outs | map(select(.output == $m.output)) | first)) as $o
+      | select($o != null)
+      | {output: $o.output, key: $o.key, serial: $o.serial,
+         mode: "\($o.width)x\($o.height)@\($o.refresh)", scale: $o.scale, transform: $o.transform,
+         x: ($m.x | round), y: ($m.y | round),
+         enabled: ($m.enabled != false and ($m.handoff != true)),
+         handoff: ($m.handoff == true),
+         desktop: ($p[0].ddc[$o.key].desktop // null), other: ($p[0].ddc[$o.key].other // null)} ]
+  ' <<<"$layout")
+  [ "$(jq length <<<"$plan")" -gt 0 ] || die "none of the layout's monitors are connected"
+  jq -e 'any(.[]; .enabled)' >/dev/null <<<"$plan" || die "the layout turns every monitor off"
+
+  # Hyprland wants the enabled monitors to start at 0,0.
+  plan=$(jq -c '(map(select(.enabled)) | [(map(.x) | min), (map(.y) | min)]) as [$dx, $dy]
+                | map(.x -= $dx | .y -= $dy)' <<<"$plan")
+
+  # Does Hyprland's arrangement actually change? Deskflow's server has to stop
+  # while it does: xdg-desktop-portal-hyprland can crash when outputs change
+  # under a live input-capture session, and the server only learns its new
+  # screen size when it starts anyway.
+  local changes was_running=""
+  changes=$(jq -c --argjson outs "$outs" '[ .[] as $m | ($outs | map(select(.output == $m.output)) | first) as $o
+      | select($o == null or ($o.disabled == $m.enabled) or ($m.enabled and ($o.x != $m.x or $o.y != $m.y))) | $m.output ]' <<<"$plan")
+  if [ -z "$hypr_only" ] && [ -z "$dry" ] && [ "$changes" != "[]" ] && running; then
+    was_running=1; systemctl --user stop "$unit"
+  fi
+
+  # 1. hand monitors to the other computer (input first, then switch the output off)
+  if [ -z "$hypr_only" ]; then
+    while IFS=$'\t' read -r sn code; do ddc_switch "$sn" "$code"; done \
+      < <(jq -r '.[] | select(.handoff and .other != null and .serial != "") | [.serial, .other] | @tsv' <<<"$plan")
+  fi
+  while read -r out; do hypr_monitor "$out" --off; done \
+    < <(jq -r '.[] | select(.enabled | not) | .output' <<<"$plan")
+  # 2. this computer's monitors, at the layout's positions. Order matters, or
+  # one lands on another for a moment and Hyprland flags an overlap: those
+  # moving right go first, rightmost first, then the rest from the left.
+  while IFS=$'\t' read -r out mode x y scale tr; do hypr_monitor "$out" "$mode" "$x" "$y" "$scale" "$tr"; done \
+    < <(jq -r --argjson outs "$outs" '
+          map(select(.enabled) | . as $m | ($outs | map(select(.output == $m.output)) | first) as $o
+              | . + {right: ($o != null and ($o.disabled | not) and .x > $o.x)})
+          | (map(select(.right)) | sort_by(-.x)) + (map(select(.right | not)) | sort_by(.x, .y))
+          | .[] | [.output, .mode, .x, .y, .scale, .transform] | @tsv' <<<"$plan")
+  if [ -z "$hypr_only" ]; then
+    while IFS=$'\t' read -r sn code; do ddc_switch "$sn" "$code"; done \
+      < <(jq -r '.[] | select(.enabled and .desktop != null and .serial != "") | [.serial, .desktop] | @tsv' <<<"$plan")
+  fi
+  [ -n "$hypr_only" ] && return 0
+
+  # 3. Deskflow links (server only; deskflow-core reads them when it starts)
+  if [ "$(role)" != client ] && jq -e '(.links // []) | length > 0' >/dev/null <<<"$layout"; then
+    local text; text=$(render_links "$layout")
+    if [ -n "$dry" ]; then printf '%s\n' "$text"; return 0; fi
+    point_deskflow_at_links
+    # Deskflow 1.27 knows computers only from [computer_<name>] sections in Deskflow.conf;
+    # a links file naming anyone else fails with "unknown computer name".
+    local n
+    while read -r n; do
+      [ "$(ini_get "computer_$n" name)" = "$n" ] || ini_set "computer_$n" name "$n"
+    done < <(jq -r '[.links[] | .from, .to] | unique[] | gsub("[^A-Za-z0-9._-]"; "")' <<<"$layout")
+    # Only rewrite and restart when the links changed, so connected computers aren't dropped for nothing.
+    if [ "$text" != "$(cat "$links_file" 2>/dev/null)" ]; then
+      printf '%s\n' "$text" > "$links_file"
+      [ -n "$was_running" ] || restart_if_running
+    fi
+  fi
+  if [ -n "$was_running" ]; then start >/dev/null 2>&1 || true; fi
+  return 0
+}
+
+point_deskflow_at_links() {
+  [ "$(ini_get server externalConfig)" = true ] || ini_set server externalConfig true
+  [ "$(ini_get server externalConfigFile)" = "$links_file" ] || ini_set server externalConfigFile "$links_file"
+  local rel; rel=$(jq -r '.options.relativeMouseMoves // empty' "$presets_file" 2>/dev/null)
+  [ -n "$rel" ] && [ "$(ini_get server relativeMouseMoves)" != "$rel" ] && ini_set server relativeMouseMoves "$rel"
+  return 0
+}
+
+# ---------------------------------------------------------------- presets
+slug() { tr '[:upper:]' '[:lower:]' <<<"$1" | sed 's/[^a-z0-9]\+/-/g; s/^-//; s/-$//' | cut -c1-40; }
+
+preset_cmd() {
+  ensure_presets
+  case "${1:-list}" in
+    list) jq -c --arg cur "$(current_preset)" '{current: $cur, presets: [.presets[] | {id, name, note: (.note // "")}]}' "$presets_file" ;;
+    get) jq -ce --arg id "${2:-}" '.presets[] | select(.id == $id)' "$presets_file" || die "unknown preset: ${2:-}" ;;
+    apply)
+      local id="${2:-}" p
+      p=$(jq -ce --arg id "$id" '.presets[] | select(.id == $id)' "$presets_file") \
+        || die "unknown preset: $id (have: $(jq -r '[.presets[].id] | join(", ")' "$presets_file"))"
+      apply_layout "$p" || return 1
+      if [ -z "$dry" ]; then
+        mkdir -p "$state_dir" && printf '%s\n' "$id" > "$state_dir/preset"
+        notify "Layout: $(jq -r .name <<<"$p")" "$(jq -r '.note // ""' <<<"$p")"
+      fi ;;
+    save)
+      local layout="${2:-}" name id
+      valid_layout "$layout" || die "invalid layout"
+      name=$(jq -r '.name // "" | .[0:40]' <<<"$layout"); [ -n "$name" ] || die "a preset needs a name"
+      id=$(jq -r '.id // ""' <<<"$layout"); [[ "$id" =~ ^[a-z0-9-]{1,40}$ ]] || id=$(slug "$name")
+      [ -n "$id" ] || id=preset-$(date +%s)
+      jq --argjson l "$layout" --arg id "$id" '
+        ($l | {id: $id, name, note: (.note // "" | .[0:240]), monitors, screens: (.screens // []), links: (.links // [])}) as $p
+        | if any(.presets[]; .id == $id) then .presets |= map(if .id == $id then $p else . end)
+          else .presets += [$p] end
+        | .computers = ((.computers // {}) + ([ $l.screens[]? | {key: .name, value: {width, height}} ] | from_entries))
+      ' "$presets_file" | write_presets || return 1
+      # --current: the window saved exactly what it just applied.
+      [ "${3:-}" = --current ] && mkdir -p "$state_dir" && printf '%s\n' "$id" > "$state_dir/preset"
+      echo "$id" ;;
+    delete)
+      jq --arg id "${2:-}" '.presets |= map(select(.id != $id))' "$presets_file" | write_presets
+      [ "$(current_preset)" = "${2:-}" ] && rm -f "$state_dir/preset"; return 0 ;;
+    reapply)
+      local id; id=$(current_preset); [ -n "$id" ] || return 0
+      local p; p=$(jq -ce --arg id "$id" '.presets[] | select(.id == $id)' "$presets_file") || return 0
+      apply_layout "$p" "$([ "${2:-}" = --hypr-only ] && echo 1)" ;;
+    *) die "usage: deskflowctl preset list|apply <id>|save <json>|delete <id>|reapply [--hypr-only]" ;;
+  esac
+}
+
+# ---------------------------------------------------------------- TLS + trust
+make_cert() {
+  [ -s "$cert" ] && return 0
+  mkdir -p "$tls_dir" && chmod 700 "$tls_dir"
+  local tmp; tmp=$(mktemp "$cert.XXXXXX") || return 1
+  openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 3650 -subj /CN=Deskflow \
+    -keyout "$tmp" -out "$tmp.crt" >/dev/null 2>&1 || { rm -f "$tmp" "$tmp.crt"; die "openssl failed"; }
+  cat "$tmp.crt" >> "$tmp" && rm -f "$tmp.crt" && chmod 600 "$tmp" && mv -f "$tmp" "$cert"
+  ini_set security certificate "$cert"
+  ini_set security tlsEnabled true
+}
+norm_fp() { tr -d ': \n' <<<"$1" | tr '[:upper:]' '[:lower:]'; }
+trust() { # file fingerprint
+  local fp; fp=$(norm_fp "$2")
+  [[ "$fp" =~ ^[0-9a-f]{64}$ ]] || die "that is not a SHA-256 fingerprint"
+  mkdir -p "$tls_dir"
+  grep -qx "v2:sha256:$fp" "$1" 2>/dev/null || printf 'v2:sha256:%s\n' "$fp" >> "$1"
+}
+# A Wayland client injects input through the RemoteDesktop portal. Hyprland's
+# portal does not provide it (yet), and deskflow-core crashes without it.
+remote_desktop_portal() {
+  busctl --user introspect org.freedesktop.portal.Desktop /org/freedesktop/portal/desktop 2>/dev/null \
+    | grep -q 'org.freedesktop.portal.RemoteDesktop'
+}
+client_blocked() { [ "$(role)" = client ] && [ -n "${WAYLAND_DISPLAY:-}" ] && ! remote_desktop_portal; }
+fetch_server_fp() {
+  local host="${1:-$(server_host)}"
+  [[ "$host" =~ ^[A-Za-z0-9._:-]{1,253}$ ]] || die "bad host"
+  timeout 6 openssl s_client -connect "$host:$port" </dev/null 2>/dev/null \
+    | openssl x509 -noout -fingerprint -sha256 2>/dev/null | sed 's/.*=//' | grep . || die "No Deskflow server answered at $host:$port. Check that Deskflow is started on the server, that both computers are on the same network, and that the server's firewall allows port $port."
+}
+# Server: wait up to two minutes for a computer whose fingerprint isn't trusted yet.
+# Deskflow only logs peer fingerprints at Debug level, so the level is raised for the wait.
+pair() {
+  [ "$(role)" = server ] || die "pairing runs on the server"
+  local old; old=$(ini_get log level)
+  ini_set log level Debug
+  systemctl --user restart "$unit" || start
+  trap '[ -n "$old" ] && ini_set log level "$old" || ini_set log level Info; restart_if_running' EXIT
+  local since; since=$(date '+%Y-%m-%d %H:%M:%S')
+  timeout 120 journalctl --user -u "$unit" -f --since "$since" -o cat --no-pager 2>/dev/null \
+    | sed -un 's/.*peer fingerprint: \([0-9A-Fa-f]\{64\}\).*/\1/p' \
+    | while read -r fp; do
+        # A computer paired before is let straight in; say so rather than wait on.
+        local known=false
+        grep -qx "v2:sha256:$(norm_fp "$fp")" "$tls_dir/trusted-clients" 2>/dev/null && known=true
+        printf '{"fingerprint":"%s","trusted":%s}\n' "$(sed 's/../&:/g; s/:$//' <<<"$fp" | tr '[:lower:]' '[:upper:]')" "$known"
+        pkill -P $$ timeout 2>/dev/null; break
+      done
+}
+
+# ---------------------------------------------------------------- setup checklist
+doctor() {
+  local r; r=$(role)
+  local items=()
+  add() { # id ok required title detail fixLabel fixKind fixArg
+    items+=("$(jq -nc --arg id "$1" --argjson ok "$2" --argjson req "$3" --arg t "$4" --arg d "$5" \
+      --arg fl "${6:-}" --arg fk "${7:-}" --arg fa "${8:-}" \
+      '{id: $id, ok: $ok, required: $req, title: $t, detail: $d}
+       + (if $fk != "" then {fix: {label: $fl, kind: $fk, arg: $fa}} else {} end)')")
+  }
+  if have deskflow-core; then add deskflow true true "Deskflow is installed" "$(deskflow-core --version 2>/dev/null | head -1)"
+  else add deskflow false true "Install Deskflow" "The deskflow package from the Arch repos." "Install" terminal "omarchy pkg add deskflow"; fi
+
+  if [ "$r" = none ]; then add role false true "Choose a role" "Server shares this computer's keyboard and mouse. Client is controlled by another computer."
+  else add role true true "Role: $r" "$([ "$r" = server ] && echo "Other computers connect to this one." || { h=$(server_host); [ -n "$h" ] && echo "This computer connects to $h." || echo "It connects to the server once you enter its address."; })"; fi
+
+  add name true true "Computer name: $(computer_name)" "Other computers must use exactly this name in their layout."
+
+  if [ -s "$cert" ]; then add cert true true "TLS certificate" "SHA256 $(fingerprint)"
+  else add cert false true "Create a TLS certificate" "Deskflow encrypts the connection with it." "Create" run cert; fi
+
+  if [ -f "$unit_file" ] && grep -q "deskflow-core $([ "$r" = client ] && echo client || echo server)" "$unit_file"; then
+    add unit true true "Background service installed" "$unit runs Deskflow without its window."
+  else add unit false true "Install the background service" "A systemd user unit, so Deskflow runs without its window." "Install" run unit; fi
+
+  if [ -f "$cfg_home/systemd/user/deskflow-server.service" ] && [ -f "$unit_file" ]; then
+    add old-unit false false "Old deskflow-server.service found" "It would start a second copy of Deskflow at login." "Disable it" run "migrate-unit"
+  fi
+
+  if [ "$r" = server ]; then
+    if systemctl is-active --quiet ufw 2>/dev/null; then
+      if grep -qE "(^|[^0-9])$port(/tcp)?([^0-9]|$)" /etc/ufw/user.rules 2>/dev/null; then add firewall true true "Firewall allows port $port" "ufw is on and lets Deskflow in."
+      else add firewall false true "Open port $port in the firewall" "ufw is on and blocks Deskflow." "Open port" terminal "sudo ufw allow $port/tcp comment Deskflow"; fi
+    else add firewall true false "Firewall" "ufw is not running, so nothing blocks port $port."; fi
+  fi
+  if [ "$r" = client ] && client_blocked; then
+    add portal false true "Hyprland can't be controlled remotely yet" "Deskflow's client needs the RemoteDesktop portal, which xdg-desktop-portal-hyprland doesn't provide. Use this computer as the server instead."
+  fi
+  if [ "$r" = client ]; then
+    local h; h=$(server_host)
+    if [ -z "$h" ]; then add server false true "Enter the server's address" "Shown in the Deskflow panel on the server."
+    elif [ -s "$tls_dir/trusted-servers" ]; then add server true true "Server: $h" "Its fingerprint is trusted."
+    else add server false true "Trust the server at $h" "Compare the fingerprint with the one shown on the server." "Check" run "fetch-server-fingerprint"; fi
+  fi
+
+  # NordVPN with LAN discovery off drops LAN traffic, including Deskflow.
+  if have nordvpn && nordvpn status 2>/dev/null | grep -qi 'status: connected'; then
+    local s cidr; s=$(nordvpn settings 2>/dev/null); cidr=$(lan_cidr)
+    if grep -qi 'LAN Discovery: enabled' <<<"$s" || { [ -n "$cidr" ] && grep -qF "$cidr" <<<"$s"; }; then
+      add vpn true false "NordVPN allows the local network" "LAN Discovery or an allowlisted subnet lets Deskflow through."
+    else add vpn false true "NordVPN is blocking the local network" "Allowlist ${cidr:-your LAN} so the other computer can reach port $port." "Allow LAN" run "nordvpn-allow"; fi
+  fi
+
+  if have ddcutil; then
+    if ls /dev/i2c-* >/dev/null 2>&1; then add ddc true false "Monitor input switching available" "ddcutil can reach your monitors over DDC/CI."
+    else add ddc false false "Load the i2c-dev module" "Needed to switch monitor inputs from a layout." "Load it" terminal "sudo modprobe i2c-dev && echo i2c-dev | sudo tee /etc/modules-load.d/i2c-dev.conf"; fi
+  else add ddc false false "Optional: install ddcutil" "Lets a layout switch a monitor's input to the other computer." "Install" terminal "omarchy pkg add ddcutil"; fi
+
+  if running; then add running true false "Deskflow is running" "$([ "$r" = client ] && echo "Connecting to $(server_host)." || echo "Listening on $(lan_ip):$port.")"
+  else add running false false "Deskflow is off" "Switch it on from the bar, or here." "Start" run on; fi
+
+  local conn="[]" ip
+  if [ "$r" = server ]; then
+    conn=$(for ip in $(peers); do jq -nc --arg n "$(peer_label "$ip")" --arg ip "$ip" '{name: $n, ip: $ip}'; done | jq -sc .)
+  fi
+  local ntrust; ntrust=$(grep -c . "$tls_dir/trusted-clients" 2>/dev/null || true)
+  printf '%s\n' "${items[@]}" | jq -sc --argjson conn "$conn" --argjson ntrust "${ntrust:-0}" --arg role "$r" --arg name "$(computer_name)" --arg host "$(server_host)" \
+    --arg ip "$(lan_ip)" --argjson port "$port" --arg fp "$(fingerprint)" \
+    '{role: $role, connected: $conn, trustedClients: $ntrust, name: $name, serverHost: $host, ip: $ip, port: $port, fingerprint: $fp, checks: .,
+      ready: all(.[]; .ok or (.required | not))}'
+}
+
+# ---------------------------------------------------------------- notifications
+# One notification per subject. A repeat within 10 minutes replaces the one on
+# screen and counts up ("Lost the connection (3)") instead of stacking a new one.
+notify() { # [-u level] title [body]
+  local urg=() title body f="$state_dir/notify" id="" last="" count=0 when=0 now
+  if [ "${1:-}" = -u ]; then urg=(-u "$2"); shift 2; fi
+  title=$1 body=${2:-}; now=$(date +%s)
+  mkdir -p "$state_dir"
+  [ -r "$f" ] && IFS=$'\t' read -r id when count last < "$f"
+  if [ -n "$id" ] && [ "$last" = "$title" ] && [ $((now - ${when:-0})) -lt 600 ]; then count=$((count + 1)); else count=1; fi
+  local shown=$title; [ "$count" -gt 1 ] && shown="$title ($count)"
+  local args=(-a Deskflow -i org.deskflow.deskflow -p "${urg[@]}"); [ -n "$id" ] && args+=(-r "$id")
+  id=$(notify-send "${args[@]}" "$shown" "$body" 2>/dev/null) || return 0
+  printf '%s\t%s\t%s\t%s\n' "$id" "$now" "$count" "$title" > "$f"
+}
+# Name for a peer: the only other computer in the layout, else its IP.
+peer_label() {
+  if [ "$(role)" = client ]; then printf 'Server %s' "$1"; return; fi
+  local names
+  names=$(awk '/^[[:space:]]*section:[[:space:]]*links/ {inl=1; next} inl && /^[[:space:]]*end[[:space:]]*$/ {inl=0}
+               inl && /^[[:space:]]*[^=]+:[[:space:]]*$/ {n=$0; gsub(/[[:space:]:]/,"",n); print n}' "$links_file" 2>/dev/null \
+          | grep -vxF "$(computer_name)")
+  if [ "$(grep -c . <<<"$names")" -eq 1 ]; then printf '%s' "$names"; else printf '%s' "$1"; fi
+}
+watch_peers() {
+  local prev now ip
+  prev=$(peers)
+  local parent=$PPID
+  # Exit with the shell that started us; a restarted shell starts a new one.
+  while sleep 2 && [ "$PPID" = "$parent" ] && kill -0 "$parent" 2>/dev/null; do
+    now=$(peers)
+    for ip in $(comm -13 <(printf '%s\n' "$prev") <(printf '%s\n' "$now")); do
+      notify "$(peer_label "$ip") connected" "$([ "$(role)" = client ] && echo "This computer now follows its keyboard and mouse." || echo "Your keyboard and mouse now reach it from $ip.")"
+    done
+    for ip in $(comm -23 <(printf '%s\n' "$prev") <(printf '%s\n' "$now")); do
+      running && notify -u critical "$(peer_label "$ip") disconnected" "Lost the connection to $ip. Deskflow reconnects on its own."
+    done
+    prev=$now
+  done
+}
+
+# ---------------------------------------------------------------- state for the bar
+state() {
+  ensure_presets
+  local r=false a=false name links_json
+  running && r=true
+  enabled && a=true
+  name=$(computer_name)
+  # Neighbours from the links file: "<dir>[(a,b)] = <screen>[(c,d)]" under "<name>:".
+  links_json=$(awk -v me="$name" '
+    /^[[:space:]]*section:[[:space:]]*links/ {inl=1; next}
+    inl && /^[[:space:]]*end[[:space:]]*$/ {inl=0}
+    inl && /^[[:space:]]*[^=]+:[[:space:]]*$/ {cur=$0; gsub(/[[:space:]:]/,"",cur); next}
+    inl && cur==me && /=/ {split($0,kv,"="); d=kv[1]; v=kv[2]; gsub(/[[:space:]]|\(.*\)/,"",d); gsub(/[[:space:]]|\(.*\)/,"",v); print d"\t"v}
+  ' "$links_file" 2>/dev/null | jq -Rnc '[inputs | split("\t") | {dir: .[0], to: .[1]}] | group_by(.dir) | map({key: .[0].dir, value: (map(.to) | unique)}) | from_entries')
+  jq -nc --argjson running "$r" --argjson autostart "$a" --arg role "$(role)" \
+    --arg name "$name" --arg ip "$(lan_ip)" --argjson port "$port" --arg fp "$(fingerprint)" \
+    --arg host "$(server_host)" --arg peers "$(peers)" --argjson links "${links_json:-{\}}" \
+    --arg preset "$(current_preset)" --argjson installed "$(have deskflow-core && echo true || echo false)" \
+    --argjson unit "$([ -f "$unit_file" ] && echo true || echo false)" \
+    --slurpfile p "$presets_file" '
+    def lines: split("\n") | map(select(length > 0));
+    {running: $running, autostart: $autostart, role: $role, installed: $installed, unit: $unit,
+     name: $name, ip: $ip, port: $port, fingerprint: $fp, serverHost: $host,
+     peers: ($peers | lines), links: $links, preset: $preset,
+     presets: [ $p[0].presets[] | {id, name, note: (.note // "")} ]}'
+}
+
+# ---------------------------------------------------------------- migration from the pre-1.0 plugin
+# Old presets.json: {monitors: {PORT: {serial, mode, desktop, laptop}}, presets: [{id, name, laptop: [PORT],
+# positions: {PORT: "XxY"}, links: {screen: {dir: screen}}, summary, cable, note}]}
+migrate_v1() {
+  local old="$1"
+  [ -r "$old" ] || die "cannot read $old"
+  ensure_presets
+  local outs; outs=$(outputs_json)
+  jq --argjson outs "$outs" --slurpfile cur "$presets_file" '
+    . as $o
+    | def key($port): ($o.monitors[$port].serial // "") as $s | if $s != "" then $s else ($outs | map(select(.output == $port)) | first | .key // $port) end;
+      def size($port): ($outs | map(select(.output == $port)) | first) // {lw: 1920, lh: 1080};
+    {
+      version: 2,
+      options: ($o.options // {}),
+      ddc: ([ $o.monitors | to_entries[] | select(.value.serial and .value.desktop)
+              | {key: .value.serial, value: ({desktop: .value.desktop} + (if .value.laptop then {other: .value.laptop} else {} end))} ] | from_entries),
+      computers: ($cur[0].computers // {}),
+      presets: [ $o.presets[] as $p | {
+        id: $p.id, name: $p.name,
+        note: ([$p.summary, (if $p.cable then "Cable: " + $p.cable else null end), $p.note] | map(select(. != null and . != "")) | join(" "))[0:240],
+        monitors: [ $o.monitors | keys[] as $port
+          | ($p.positions[$port] // null) as $pos
+          | {key: key($port), output: $port,
+             x: (if $pos then ($pos | split("x")[0] | tonumber) else 0 end),
+             y: (if $pos then ($pos | split("x")[1] | tonumber) else 0 end),
+             enabled: ($pos != null), handoff: (($p.laptop // []) | index($port) != null)} ],
+        screens: [],
+        links: [ $p.links | to_entries[] as $s | $s.value | to_entries[] | {from: $s.key, dir: .key, to: .value} ]
+      } ]
+    }' "$old" | write_presets
+}
+
+# ---------------------------------------------------------------- dispatch
+dry=""
+args=()
+for a in "$@"; do if [ "$a" = --dry-run ]; then dry=1; else args+=("$a"); fi; done
+set -- "${args[@]}"
+
+case "${1:-state}" in
+  state|json) state ;;
+  on|start) start ;;
+  off|stop) stop ;;
+  toggle) if running; then stop; else start; fi ;;
+  status) if running; then echo on; else echo off; exit 1; fi ;;
+  autostart)
+    case "${2:-status}" in
+      on)  [ -f "$unit_file" ] || write_unit; systemctl --user enable "$unit" 2>/dev/null ;;
+      off) systemctl --user disable "$unit" 2>/dev/null ;;
+      status) if enabled; then echo on; else echo off; exit 1; fi ;;
+      *) die "usage: deskflowctl autostart on|off|status" ;;
+    esac ;;
+  role)
+    case "${2:-}" in server) ini_set core coreMode 2 ;; client) ini_set core coreMode 1 ;; *) die "usage: deskflowctl role server|client" ;; esac
+    [ -n "$(ini_get core computerName)" ] || ini_set core computerName "$(hostname)"
+    if [ "$2" = server ]; then
+      ensure_presets; point_deskflow_at_links
+      ini_set "computer_$(computer_name)" name "$(computer_name)"
+      [ -s "$links_file" ] || printf 'section: links\n\t%s:\nend\n' "$(computer_name)" > "$links_file"
+    fi
+    # A client with nowhere to connect would only crash and restart; park it
+    # until server-host is given, then start it again.
+    st=$(systemctl --user is-active "$unit" 2>/dev/null)
+    if [ "$2" = client ] && [ -z "$(server_host)" ] && [ "$st" != inactive ] && [ "$st" != failed ]; then
+      mkdir -p "$state_dir"; : > "$state_dir/start-when-host"; stop
+    else rm -f "$state_dir/start-when-host"
+    fi
+    [ -f "$unit_file" ] && write_unit; true ;;
+  name)
+    [[ "${2:-}" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || die "use letters, digits, dot, dash or underscore"
+    ini_set core computerName "$2"; ini_set "computer_$2" name "$2"; restart_if_running ;;
+  server-host)
+    [[ "${2:-}" =~ ^[A-Za-z0-9._:-]{1,253}$ ]] || die "bad host"
+    ini_set client remoteHost "$2"
+    # Start a client that was parked (or gave up) for want of an address.
+    if [ -e "$state_dir/start-when-host" ] || { [ "$(role)" = client ] && [ "$(systemctl --user is-active "$unit" 2>/dev/null)" = failed ]; }; then
+      rm -f "$state_dir/start-when-host"; systemctl --user reset-failed "$unit" 2>/dev/null; client_blocked || start
+    else restart_if_running; fi ;;
+  doctor) doctor ;;
+  init)
+    # Pre-1.0 installs kept presets in ~/.config/Deskflow/presets.json (no "version").
+    if [ ! -s "$presets_file" ] && [ -s "$df_dir/presets.json" ] && jq -e 'has("version") | not' "$df_dir/presets.json" >/dev/null 2>&1; then
+      migrate_v1 "$df_dir/presets.json" && echo "migrated $df_dir/presets.json"
+    fi
+    # Pre-1.0 installs pointed Deskflow at ~/.config/Deskflow/deskflow-server.conf.
+    if [ ! -s "$links_file" ] && [ -s "$df_dir/deskflow-server.conf" ]; then mkdir -p "$cfg_dir"; cp "$df_dir/deskflow-server.conf" "$links_file"; fi
+    [ "$(role)" = server ] && [ -s "$links_file" ] && point_deskflow_at_links
+    true ;;
+  cert) make_cert ;;
+  unit) write_unit ;;
+  migrate-unit)
+    old=$cfg_home/systemd/user/deskflow-server.service
+    was=$(systemctl --user is-enabled deskflow-server.service 2>/dev/null)
+    systemctl --user disable --now deskflow-server-notify.service deskflow-server.service 2>/dev/null
+    rm -f "$old" "$cfg_home/systemd/user/deskflow-server-notify.service"
+    systemctl --user daemon-reload
+    [ "$was" = enabled ] && systemctl --user enable "$unit" 2>/dev/null; true ;;
+  nordvpn-allow) c=$(lan_cidr); [ -n "$c" ] || die "no LAN subnet found"; nordvpn allowlist add subnet "$c" ;;
+  monitors) monitors_cmd ;;
+  ddc-probe) [[ "${2:-}" =~ ^[A-Za-z0-9._\ -]{1,64}$ ]] || die "bad serial"; ddc_probe "$2" ;;
+  ddc-set) ddc_set "${2:-}" "${3:-}" "${4:-none}" ;;
+  apply) apply_layout "${2:-}" && [ -z "$dry" ] && rm -f "$state_dir/preset"; true ;;
+  links) render_links "${2:-}" ;;
+  preset) shift; preset_cmd "$@" ;;
+  presets) preset_cmd list ;;
+  fetch-server-fingerprint) fetch_server_fp "${2:-}" ;;
+  trust-server) trust "$tls_dir/trusted-servers" "${2:-}"; restart_if_running ;;
+  trust-client) trust "$tls_dir/trusted-clients" "${2:-}" ;;
+  pair) pair ;;
+  watch)
+    # One watcher per session: a shell reload can start a second one, which
+    # would send every notification twice. The newest takes over.
+    mkdir -p "$state_dir"
+    if [ -r "$state_dir/watch.pid" ]; then
+      op=$(cat "$state_dir/watch.pid")
+      [[ "$op" =~ ^[0-9]+$ ]] && [ "$op" != $$ ] && grep -q deskflowctl "/proc/$op/cmdline" 2>/dev/null && kill "$op" 2>/dev/null
+    fi
+    echo $$ > "$state_dir/watch.pid"
+    watch_peers ;;
+  migrate-v1) migrate_v1 "${2:-$df_dir/presets.json}" ;;
+  uninstall)
+    systemctl --user disable --now "$unit" 2>/dev/null
+    grep -q 'tesserarius.deskflow' "$unit_file" 2>/dev/null && rm -f "$unit_file"
+    systemctl --user daemon-reload
+    echo "Removed $unit. Your settings in $cfg_dir and $df_dir are kept." ;;
+  *) die "usage: see the header of $0" ;;
+esac

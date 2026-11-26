@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "tesserarius.deskflow",
+  "name": "Deskflow",
+  "version": "1.0.0",
+  "author": "tesserarius",
+  "license": "MIT",
+  "description": "Share one keyboard and mouse across computers with Deskflow. Guided setup as server or client, a drag-and-drop layout of your monitors and other computers, and presets that can also switch monitor inputs.",
+  "homepage": "https://github.com/TesserariusLLC/omarchy-deskflow",
+  "kinds": ["bar-widget", "service"],
+  "entryPoints": { "barWidget": "Panel.qml", "service": "Service.qml" },
+  "barWidget": {
+    "displayName": "Deskflow",
+    "description": "Click for the on/off switch, layout presets and setup. Middle-click toggles Deskflow.",
+    "category": "Network",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {},
+    "schema": []
+  }
+}
