@@ -707,13 +707,15 @@ case "${1:-state}" in
     else restart_if_running; fi ;;
   doctor) doctor ;;
   init)
-    # Pre-1.0 installs kept presets in ~/.config/Deskflow/presets.json (no "version").
+    # Runs each time the shell loads the plugin, so it only upgrades this
+    # plugin's own pre-1.0 install (marked by a presets.json without "version").
+    # A fresh install changes nothing until the user acts in Setup or Layout.
     if [ ! -s "$presets_file" ] && [ -s "$df_dir/presets.json" ] && jq -e 'has("version") | not' "$df_dir/presets.json" >/dev/null 2>&1; then
       migrate_v1 "$df_dir/presets.json" && echo "migrated $df_dir/presets.json"
+      # Pre-1.0 pointed Deskflow at ~/.config/Deskflow/deskflow-server.conf.
+      if [ ! -s "$links_file" ] && [ -s "$df_dir/deskflow-server.conf" ]; then cp "$df_dir/deskflow-server.conf" "$links_file"; fi
+      [ "$(role)" = server ] && [ -s "$links_file" ] && point_deskflow_at_links
     fi
-    # Pre-1.0 installs pointed Deskflow at ~/.config/Deskflow/deskflow-server.conf.
-    if [ ! -s "$links_file" ] && [ -s "$df_dir/deskflow-server.conf" ]; then mkdir -p "$cfg_dir"; cp "$df_dir/deskflow-server.conf" "$links_file"; fi
-    [ "$(role)" = server ] && [ -s "$links_file" ] && point_deskflow_at_links
     true ;;
   cert) make_cert ;;
   unit) write_unit ;;
