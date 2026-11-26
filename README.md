@@ -8,6 +8,18 @@ Use your Omarchy PC's keyboard and mouse on your other computers (Windows, macOS
 - **Quiet notifications.** You get one notification when a computer connects or disconnects. If the same event repeats, that notification updates and counts up ("LAPTOP disconnected (3)") instead of stacking new ones.
 - **Optional monitor input switching.** If a monitor is cabled to both computers, a preset can switch its input over DDC/CI and take it out of this computer's layout.
 
+## Screenshots
+
+These use example data: computer names, addresses and monitors are made up.
+
+| Arrange monitors | A preset that hands a monitor to the other computer |
+|---|---|
+| ![Arrange monitors window with a MacBook left of three monitors](docs/layout.png) | ![The LG monitor shows the MacBook, which sits above the Dell](docs/layout-shared.png) |
+
+| Setup | Bar panel |
+|---|---|
+| ![Setup checklist with every step done](docs/setup.png) | ![Bar panel with presets, connected computers, address and fingerprint](docs/panel.png) |
+
 > **Omarchy is the server: the computer whose keyboard and mouse you use.** It can't be a client yet, so another computer can't control it. On Wayland, Deskflow's client moves the pointer through the desktop portal's RemoteDesktop interface. Hyprland's portal (`xdg-desktop-portal-hyprland`, 1.4.1 when this was written) doesn't provide that interface, so `deskflow-core client` stops with `No such interface "org.freedesktop.portal.RemoteDesktop"` and then crashes. Hyprland does provide the InputCapture interface, which the server needs, so server mode works. The plugin still offers the client role, but it won't start Deskflow as a client while that interface is missing, so it never crash-loops or fills your notifications. Setup shows the reason instead. When Hyprland adds RemoteDesktop support, client mode will work without changes. Progress: [Deskflow discussion #7499](https://github.com/deskflow/deskflow/discussions/7499).
 
 ## Install
