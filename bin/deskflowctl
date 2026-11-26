@@ -652,6 +652,20 @@ args=()
 for a in "$@"; do if [ "$a" = --dry-run ]; then dry=1; else args+=("$a"); fi; done
 set -- "${args[@]}"
 
+# Applying a layout can switch off the monitor whose bar started us, and the
+# shell then kills that bar's processes. Run it in its own session so it always
+# finishes (and starts Deskflow again); the caller still gets output and status.
+if [ -z "$dry" ] && [ -z "${DESKFLOWCTL_DETACHED:-}" ] && have setsid \
+   && { [ "${1:-}" = apply ] || { [ "${1:-}" = preset ] && [ "${2:-}" = apply ]; }; }; then
+  out=$(mktemp) err=$(mktemp)
+  DESKFLOWCTL_DETACHED=1 setsid "$0" "$@" >"$out" 2>"$err" </dev/null &
+  child=$!
+  trap '' TERM HUP INT PIPE
+  wait "$child"; rc=$?
+  cat "$out"; cat "$err" >&2; rm -f "$out" "$err"
+  exit "$rc"
+fi
+
 case "${1:-state}" in
   state|json) state ;;
   on|start) start ;;
