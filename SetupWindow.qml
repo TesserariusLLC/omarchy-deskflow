@@ -241,7 +241,7 @@ Item {
                     color: hostField.placeholderTextColor
                     font: hostField.font
                   }
-                  foreground: root.fg; font.family: root.fontFamily; font.pixelSize: Style.font.body
+                  foreground: root.fg; font.pixelSize: Style.font.body
                   validator: RegularExpressionValidator { regularExpression: /[A-Za-z0-9._:-]{1,253}/ }
                   onAccepted: if (acceptableInput && text !== root.d.serverHost) { edited = false; root.run(["server-host", text], "") }
                 }
