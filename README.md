@@ -58,6 +58,12 @@ Not possible on Hyprland yet; see the note at the top. On a desktop whose portal
 - Deskflow treats each computer as one rectangle: the outline around all of its monitors. Monitors from different computers can't alternate left to right. To get that arrangement, hand the middle monitor to the other computer with input switching.
 - A computer's size only changes where along an edge the pointer crosses. If Deskflow logs a computer's size (Debug log level), the window offers it.
 - A Hyprland config reload brings every monitor back to its configured position. The plugin then re-applies the active preset's positions, but not its input switching.
+- **Shared monitors and the other computer's display settings.** When a preset hands a shared monitor back to this computer, the other computer often still counts that monitor as part of its desktop. It's switched away from, but its cable is still plugged in. Deskflow then sees the other computer as wider than its visible screens, and the pointer has to cross an invisible area before it comes back. Tell the other computer to stop using that monitor whenever you switch:
+  - **Windows:** press Win+P. Pick **PC screen only** when the monitor comes back to this computer, and **Extend** when you hand it to the other computer.
+  - **macOS:** in System Settings → Displays, mirror or disconnect it.
+  - **Linux:** turn the output off in its display settings.
+
+  You can put that reminder in the preset's note, so it shows each time you apply the preset.
 Presets are stored in `~/.config/omarchy-deskflow/presets.json`. The plugin points Deskflow at `~/.config/omarchy-deskflow/deskflow-server.conf`.
 
 ## Gaming mode
@@ -90,6 +96,7 @@ Gaming mode doesn't stop the pointer leaving the game. A fast flick or a game re
 
 - **The pointer reaches the other computer but typing doesn't:** switch Deskflow off and on in the panel.
 - **A key keeps acting as if held:** press and release it once, on either keyboard.
+- **The pointer is stuck on the other computer and nothing reaches it:** the other computer's Deskflow client has lost the connection. Restart Deskflow on the other computer, or switch Deskflow off and on in this panel. If your keyboard and mouse are both on the other side, plug something into this computer or use the other computer's own keyboard to restart its client.
 
 ## Files it touches
 
