@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls as QQC
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -257,7 +258,7 @@ Panel {
         font.bold: true
         color: card.current ? root.foreground : root.dim
       }
-      Caption { width: parent.width; text: card.preset.note; visible: card.preset.note !== ""; maximumLineCount: card.current ? 6 : 1; elide: Text.ElideRight }
+      Caption { width: parent.width; text: card.preset.note; visible: card.preset.note !== ""; maximumLineCount: card.current ? 3 : 1; elide: Text.ElideRight }
     }
     MouseArea {
       id: cardMouse
@@ -312,7 +313,7 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(360))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(800))
+    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(1000))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -451,13 +452,57 @@ Panel {
             visible: root.presetsOpen
             width: parent.width
             spacing: Style.space(6)
-            Repeater {
-              model: root.presets
-              delegate: PresetCard { preset: modelData; number: index + 1 }
+            // Four presets show at a time; the rest scroll, so the panel keeps its height.
+            Flickable {
+              id: presetFlick
+              // Fewer on short screens, so the panel itself never needs to scroll.
+              readonly property int shown: panel.availableCardHeight > 0 && panel.availableCardHeight < Style.space(900) ? 2 : 4
+              readonly property bool scrolls: presetRepeater.count > shown
+              width: parent.width
+              height: {
+                presetColumn.implicitHeight  // re-evaluate when cards resize
+                if (!scrolls) return presetColumn.implicitHeight
+                var cut = presetRepeater.itemAt(shown)
+                return cut ? cut.y - presetColumn.spacing : presetColumn.implicitHeight
+              }
+              contentWidth: width
+              contentHeight: presetColumn.implicitHeight
+              clip: true
+              boundsBehavior: Flickable.StopAtBounds
+              flickableDirection: Flickable.VerticalFlick
+              interactive: scrolls
+              QQC.ScrollBar.vertical: QQC.ScrollBar { id: presetScroll; policy: presetFlick.scrolls ? QQC.ScrollBar.AlwaysOn : QQC.ScrollBar.AlwaysOff }
+
+              Connections {
+                target: root
+                function onPresetsOpenChanged() { if (root.presetsOpen) Qt.callLater(presetFlick.reveal, root.preset) }
+                function onPresetChanged() { if (root.presetsOpen) Qt.callLater(presetFlick.reveal, root.preset) }
+              }
+              // Bring a preset's card into view (the active one when the list opens).
+              function reveal(id) {
+                for (var i = 0; i < presetRepeater.count; i++) {
+                  var c = presetRepeater.itemAt(i)
+                  if (!c || c.preset.id !== id) continue
+                  if (c.y < contentY) contentY = c.y
+                  else if (c.y + c.height > contentY + height) contentY = Math.min(c.y + c.height - height, contentHeight - height)
+                  return
+                }
+              }
+
+              Column {
+                id: presetColumn
+                width: presetFlick.width - (presetFlick.scrolls ? presetScroll.width + Style.space(6) : 0)
+                spacing: Style.space(6)
+                Repeater {
+                  id: presetRepeater
+                  model: root.presets
+                  delegate: PresetCard { preset: modelData; number: index + 1 }
+                }
+              }
             }
             Caption {
               width: parent.width
-              text: "Keys 1–" + root.presets.length + " switch, P opens or closes this list."
+              text: "Keys 1–" + Math.min(root.presets.length, 9) + " switch, P hides this list."
             }
           }
           Button {
