@@ -53,6 +53,8 @@ Panel {
   // Deskflow's Scroll Lock: the pointer can't leave lockedOn until Scroll Lock is pressed again.
   property bool locked: false
   property string lockedOn: ""
+  // A lock stranded on this computer is released automatically, at most once a minute.
+  property double lastAutoRelease: 0
   property var presets: []
   property bool presetsOpen: false
   property string pendingPreset: ""
@@ -145,8 +147,20 @@ Panel {
           root.autostart = s.autostart === true
           root.gaming = s.gaming === true
           var lk = s.lock || {}
+          var wasLocked = root.locked
           root.locked = root.running && lk.locked === true
           root.lockedOn = /^[A-Za-z0-9._-]{0,64}$/.test(String(lk.on || "")) ? String(lk.on || "") : ""
+          if (root.locked && s.role === "server") {
+            if (lk.stranded === true) {
+              if (Date.now() - root.lastAutoRelease > 60000 && !action.running) {
+                root.lastAutoRelease = Date.now()
+                root.locked = false
+                root.run(["unlock"])
+              }
+            } else if (!wasLocked && s.gaming !== true && root.lockedOn !== "") {
+              root.run(["lock-warning", root.lockedOn])
+            }
+          }
           root.role = /^(server|client|none)$/.test(String(s.role)) ? String(s.role) : "none"
           root.installed = s.installed !== false
           root.serverHost = /^[A-Za-z0-9._:-]{0,253}$/.test(String(s.serverHost || "")) ? String(s.serverHost || "") : ""

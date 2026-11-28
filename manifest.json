@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "tesserarius.deskflow",
   "name": "Deskflow",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "author": "tesserarius",
   "license": "MIT",
   "description": "Share one keyboard and mouse across computers with Deskflow. Guided setup as server or client, a drag-and-drop layout of your monitors and other computers, and presets that can also switch monitor inputs.",
