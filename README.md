@@ -98,6 +98,7 @@ Gaming mode doesn't stop the pointer leaving the game. A fast flick or a game re
 
 - **The pointer reaches the other computer but typing doesn't:** switch Deskflow off and on in the panel.
 - **A key keeps acting as if held:** press and release it once, on either keyboard.
+- **The pointer won't leave this computer:** Scroll Lock is probably still on. If the other computer's connection drops while the pointer is locked there, the pointer comes back here and the lock keeps it here. Press Scroll Lock once.
 - **The pointer is stuck on the other computer and nothing reaches it:** the other computer's Deskflow client has lost the connection. Restart Deskflow on the other computer, or switch Deskflow off and on in this panel. If your keyboard and mouse are both on the other side, plug something into this computer or use the other computer's own keyboard to restart its client.
 
 ## Files it touches
