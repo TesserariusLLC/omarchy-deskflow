@@ -671,6 +671,23 @@ watch_peers() {
 }
 
 # ---------------------------------------------------------------- state for the bar
+# Deskflow's Scroll Lock (lock the pointer to the computer it's on) has no indicator, and many
+# keyboards have no Scroll Lock light. Work it out from this run's log: the last
+# "cursor locked/unlocked" line, and the last switch for which computer it's on.
+lock_state() {
+  local inv=""
+  running && inv=$(systemctl --user show -p InvocationID --value "$unit" 2>/dev/null)
+  if [ -z "$inv" ] || [ "$(role)" != server ]; then echo '{"locked":false,"on":""}'; return; fi
+  journalctl --user -u "$unit" _SYSTEMD_INVOCATION_ID="$inv" -o cat --no-pager -r -n 300 \
+      -g 'cursor (locked|unlocked) |switch from "|jump from "' 2>/dev/null | tac \
+    | awk -v me="$(computer_name)" '
+        BEGIN { on = me; locked = 0 }
+        /switch from "|jump from "/ { if (match($0, /to "[^"]*"/)) on = substr($0, RSTART + 4, RLENGTH - 5) }
+        /cursor locked / { locked = 1 }
+        /cursor unlocked / { locked = 0 }
+        END { gsub(/[^A-Za-z0-9._-]/, "", on); printf "{\"locked\":%s,\"on\":\"%s\"}\n", locked ? "true" : "false", on }'
+}
+
 state() {
   ensure_presets
   local r=false a=false name links_json
@@ -687,13 +704,13 @@ state() {
   jq -nc --argjson running "$r" --argjson autostart "$a" --arg role "$(role)" \
     --arg name "$name" --arg ip "$(lan_ip)" --argjson port "$port" --arg fp "$(fingerprint)" \
     --arg host "$(server_host)" --arg peers "$(peers)" --argjson links "${links_json:-{\}}" \
-    --arg preset "$(current_preset)" --argjson gaming "$(gaming_enabled && echo true || echo false)" --argjson installed "$(have deskflow-core && echo true || echo false)" \
+    --arg preset "$(current_preset)" --argjson lock "$(lock_state)" --argjson gaming "$(gaming_enabled && echo true || echo false)" --argjson installed "$(have deskflow-core && echo true || echo false)" \
     --argjson unit "$([ -f "$unit_file" ] && echo true || echo false)" \
     --slurpfile p "$presets_file" '
     def lines: split("\n") | map(select(length > 0));
     {running: $running, autostart: $autostart, role: $role, installed: $installed, unit: $unit,
      name: $name, ip: $ip, port: $port, fingerprint: $fp, serverHost: $host,
-     peers: ($peers | lines), links: $links, preset: $preset, gaming: $gaming,
+     peers: ($peers | lines), links: $links, preset: $preset, gaming: $gaming, lock: $lock,
      presets: [ $p[0].presets[] | {id, name, note: (.note // "")} ]}'
 }
 

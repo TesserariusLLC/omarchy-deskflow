@@ -25,6 +25,7 @@ Panel {
   readonly property color accent: Color.accent
   readonly property string fontFamily: (bar && bar.fontFamily) ? bar.fontFamily : Style.font.family
   readonly property string glyph: "\u{f037a}"      // nf-md-monitor_multiple
+  readonly property string lockGlyph: "\u{f033e}"  // nf-md-lock
   readonly property string copyGlyph: "\u{f018f}"  // nf-md-content_copy
 
   property bool loaded: false
@@ -48,6 +49,9 @@ Panel {
   property string copied: ""
   property string preset: ""
   property bool gaming: false
+  // Deskflow's Scroll Lock: the pointer can't leave lockedOn until Scroll Lock is pressed again.
+  property bool locked: false
+  property string lockedOn: ""
   property var presets: []
   property bool presetsOpen: false
   property string pendingPreset: ""
@@ -71,6 +75,7 @@ Panel {
     : (clients === 0 ? "On, waiting for " + (clientScreens.length === 1 ? clientScreens[0] : "computers")
     : (clients === 1 && clientScreens.length === 1 ? "On, " + clientScreens[0] + " connected"
     : "On, " + clients + " connected"))
+    + (locked && !isClient ? " · pointer locked" + (lockedOn !== "" ? " to " + lockedOn : "") : "")
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -138,6 +143,9 @@ Panel {
           root.running = s.running === true
           root.autostart = s.autostart === true
           root.gaming = s.gaming === true
+          var lk = s.lock || {}
+          root.locked = root.running && lk.locked === true
+          root.lockedOn = /^[A-Za-z0-9._-]{0,64}$/.test(String(lk.on || "")) ? String(lk.on || "") : ""
           root.role = /^(server|client|none)$/.test(String(s.role)) ? String(s.role) : "none"
           root.installed = s.installed !== false
           root.serverHost = /^[A-Za-z0-9._:-]{0,253}$/.test(String(s.serverHost || "")) ? String(s.serverHost || "") : ""
@@ -199,8 +207,8 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.glyph
-    foreground: root.running ? root.barForeground : Qt.darker(root.barForeground, 1.55)
+    text: root.locked ? root.lockGlyph : root.glyph
+    foreground: root.locked ? root.accent : (root.running ? root.barForeground : Qt.darker(root.barForeground, 1.55))
     tooltipText: "Deskflow: " + root.statusText
     onPressed: function(b) {
       if (b === Qt.MiddleButton) root.toggleServer()
@@ -386,6 +394,24 @@ Panel {
             foreground: root.foreground; fontFamily: root.fontFamily; fontSize: Style.font.body
             bordered: true; selected: true
             onClicked: root.openWindow("setup")
+          }
+        }
+
+        BorderSurface {
+          visible: root.locked && !root.isClient
+          width: parent.width
+          implicitHeight: lockCol.implicitHeight + Style.space(16)
+          radius: Style.cornerRadius
+          color: Style.selectedFillFor(root.foreground, root.accent)
+          borderSpec: Border.controlSpec("selected", root.foreground, root.accent)
+          Column {
+            id: lockCol
+            anchors { left: parent.left; right: parent.right; verticalCenter: parent.verticalCenter; leftMargin: Style.space(10); rightMargin: Style.space(10) }
+            spacing: Style.space(2)
+            Body { width: parent.width; font.bold: true; wrapMode: Text.WordWrap
+                   text: root.lockGlyph + "  Pointer locked to " + (root.lockedOn !== "" ? root.lockedOn : "one computer") }
+            Caption { width: parent.width
+                      text: "Scroll Lock is on, so the mouse and keyboard can't move to another computer. Press Scroll Lock to release them." }
           }
         }
 

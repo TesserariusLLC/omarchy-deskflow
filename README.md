@@ -92,13 +92,13 @@ Each of these changes rebuilds the keyboard, and Deskflow would keep using the o
 
 ### Keep the pointer on the game: Scroll Lock
 
-Gaming mode doesn't stop the pointer leaving the game. A fast flick or a game recentring the mouse can push it over a screen edge. From then on your input goes to this desktop instead of the game. To prevent that, move onto the other computer and press **Scroll Lock** on this computer's keyboard. Deskflow keeps the mouse and keyboard there until you press it again. Many compact and laptop keyboards put Scroll Lock on an `Fn` layer. Use both: gaming mode fixes how keys arrive, and Scroll Lock keeps them going to the game.
+Gaming mode doesn't stop the pointer leaving the game. A fast flick or a game recentring the mouse can push it over a screen edge. From then on your input goes to this desktop instead of the game. To prevent that, move onto the other computer and press **Scroll Lock** on this computer's keyboard. Deskflow keeps the mouse and keyboard there until you press it again. While the lock is on, the bar icon turns into a lock and the panel says which computer the pointer is locked to. This helps on keyboards with no Scroll Lock light. Many compact and laptop keyboards put Scroll Lock on an `Fn` layer. Use both: gaming mode fixes how keys arrive, and Scroll Lock keeps them going to the game.
 
 ### If something goes wrong
 
 - **The pointer reaches the other computer but typing doesn't:** switch Deskflow off and on in the panel.
 - **A key keeps acting as if held:** press and release it once, on either keyboard.
-- **The pointer won't leave this computer:** Scroll Lock is probably still on. If the other computer's connection drops while the pointer is locked there, the pointer comes back here and the lock keeps it here. Press Scroll Lock once.
+- **The pointer won't leave this computer:** Scroll Lock is probably still on. The bar icon shows a lock when it is. If the other computer's connection drops while the pointer is locked there, the pointer comes back here and the lock keeps it here. Press Scroll Lock once.
 - **The pointer is stuck on the other computer and nothing reaches it:** the other computer's Deskflow client has lost the connection. Restart Deskflow on the other computer, or switch Deskflow off and on in this panel. If your keyboard and mouse are both on the other side, plug something into this computer or use the other computer's own keyboard to restart its client.
 
 ## Files it touches
