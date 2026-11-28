@@ -6,6 +6,7 @@ Use your Omarchy PC's keyboard and mouse on your other computers (Windows, macOS
 - **Guided setup.** Name the computer, then work down a checklist. It covers installing Deskflow, the TLS certificate, the background service, opening the firewall port, NordVPN blocking the LAN, and pairing a new computer by comparing fingerprints. Fixes that need your password open in a terminal.
 - **A layout window.** Drag your monitors and the other computers into place, then press Apply. The window writes the Hyprland monitor positions and the matching Deskflow links. A computer can sit against just part of an edge, for example beside one monitor only. Save a layout as a preset and switch back to it from the bar with keys 1–9.
 - **Quiet notifications.** You get one notification when a computer connects or disconnects. If the same event repeats, that notification updates and counts up ("LAPTOP disconnected (3)") instead of stacking new ones.
+- **Gaming mode.** One switch in the panel for playing games on the other computer, with any layout. See [Gaming mode](#gaming-mode).
 - **Optional monitor input switching.** If a monitor is cabled to both computers, a preset can switch its input over DDC/CI and take it out of this computer's layout.
 
 ## Screenshots
@@ -38,7 +39,7 @@ Needs: `deskflow` (setup installs it), `jq`, `openssl`. Optional: `ddcutil` for 
 |---|---|
 | Left click | Panel: on/off, layouts, address, fingerprint, start at login |
 | Middle click | Switch Deskflow on or off |
-| Panel keys | `S` on/off · `A` start at login · `P` layouts · `1`–`9` apply a layout · `L` arrange monitors · `U` setup · `C` copy address · `O` Deskflow's own window |
+| Panel keys | `S` on/off · `G` gaming mode · `A` start at login · `P` layouts · `1`–`9` apply a layout · `L` arrange monitors · `U` setup · `C` copy address · `O` Deskflow's own window |
 | Terminal | `omarchy-shell deskflow layout` · `omarchy-shell deskflow setup` |
 
 ### Connecting a computer to this one (server)
@@ -57,13 +58,23 @@ Not possible on Hyprland yet; see the note at the top. On a desktop whose portal
 - Deskflow treats each computer as one rectangle: the outline around all of its monitors. Monitors from different computers can't alternate left to right. To get that arrangement, hand the middle monitor to the other computer with input switching.
 - A computer's size only changes where along an edge the pointer crosses. If Deskflow logs a computer's size (Debug log level), the window offers it.
 - A Hyprland config reload brings every monitor back to its configured position. The plugin then re-applies the active preset's positions, but not its input switching.
-- **Gaming presets.** Turn on **Gaming** under Presets before saving a preset you use to play games on the other computer. While that preset is active, the plugin turns off key repeat on this desktop and stops fcitx5 (Omarchy's `omarchy-fcitx5` unit). Both come back when you pick another preset or layout, or switch Deskflow off. Without this, games on the other computer misbehave in two ways:
-  - Hyprland repeats a held key by sending key-up and key-down about 40 times a second, so a game sees a held key as rapid taps. Call of Duty can disconnect you with "Client command overflow".
-  - Each time a keyboard's keymap changes, Hyprland rebuilds the keyboard it hands to Deskflow. A key held at that moment never gets its release, so it stays down on the other computer. fcitx5 changes its keymap whenever focus moves.
-
-  While a gaming preset is active, keys held on this desktop don't repeat, and Shift+CapsLock compose sequences don't work.
-
 Presets are stored in `~/.config/omarchy-deskflow/presets.json`. The plugin points Deskflow at `~/.config/omarchy-deskflow/deskflow-server.conf`.
+
+## Gaming mode
+
+**What it's for.** Turn on **Gaming mode** in the panel (or press `G`) whenever you play a game on the other computer using this computer's keyboard and mouse. It works with whichever layout is active, so you don't need separate gaming presets. Typing, browsing and other everyday use on the other computer don't need it.
+
+**What can happen if it's off while you play.** Both problems come from how Hyprland hands the keyboard to Deskflow, so they only happen over Deskflow, never with a keyboard plugged into the other computer:
+
+- **The game disconnects you or acts as if you're spamming keys.** Hyprland repeats a held key by sending key-up and key-down about 40 times a second, so the game sees a held movement key as rapid taps. Call of Duty kicks you with "Client command overflow". Other games may stutter or drop input.
+- **A key gets stuck, or the keyboard stops working on the other computer.** Each time a keyboard's keymap changes, Hyprland rebuilds the keyboard it hands to Deskflow. A key you're holding at that moment never gets its release, so your character keeps walking until you press that key again on the other computer's own keyboard. Sometimes the other computer stops getting your keystrokes at all while the mouse still works. fcitx5 changes its keymap whenever focus moves on this desktop. A window opening or taking focus here mid-game can set it off, for example a notification, a dialog, or an app that runs its own display like Waydroid.
+
+**What it changes.** While gaming mode is on and Deskflow is running, the plugin turns off key repeat on this desktop and stops fcitx5 (Omarchy's `omarchy-fcitx5` unit). Moving between monitors and computers works as normal. The trade-offs:
+
+- Holding a key types it once instead of repeating, on both computers. For example, holding Backspace deletes one character.
+- Shift+CapsLock compose sequences and other fcitx5 input methods, such as Chinese, Japanese or Korean input, don't work.
+
+Turn it off when you're done gaming. Switching Deskflow off also puts key repeat and fcitx5 back. The switch is remembered, so it applies again the next time Deskflow starts, including after a reboot.
 
 ## Files it touches
 

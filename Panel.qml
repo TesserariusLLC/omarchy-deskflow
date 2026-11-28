@@ -6,7 +6,7 @@ import qs.Ui
 
 // Bar widget for Deskflow, as server or client. All work goes through
 // bin/deskflowctl, which drives omarchy-deskflow.service.
-//   Left click: panel with the on/off switch, layout presets, address, start at login.
+//   Left click: panel with the on/off switch, layout presets, address, gaming mode, start at login.
 //   Middle click: toggle Deskflow.  Right click: refresh.
 //   Arrange monitors and Setup open windows owned by Service.qml (omarchy-shell deskflow layout|setup).
 Panel {
@@ -47,6 +47,7 @@ Panel {
   property string error: ""
   property string copied: ""
   property string preset: ""
+  property bool gaming: false
   property var presets: []
   property bool presetsOpen: false
   property string pendingPreset: ""
@@ -112,6 +113,11 @@ Panel {
     run(["preset", "apply", id])
   }
   function presetAt(i) { if (i >= 0 && i < presets.length) applyPreset(presets[i].id) }
+  function toggleGaming() {
+    if (action.running || root.role !== "server") return
+    root.gaming = !root.gaming
+    run(["gaming", root.gaming ? "on" : "off"])
+  }
   function toggleAutostart() { root.autostart = !root.autostart; run(["autostart", root.autostart ? "on" : "off"]) }
   function copy(what, label) {
     if (what === "") return
@@ -131,6 +137,7 @@ Panel {
           root.loaded = true
           root.running = s.running === true
           root.autostart = s.autostart === true
+          root.gaming = s.gaming === true
           root.role = /^(server|client|none)$/.test(String(s.role)) ? String(s.role) : "none"
           root.installed = s.installed !== false
           root.serverHost = /^[A-Za-z0-9._:-]{0,253}$/.test(String(s.serverHost || "")) ? String(s.serverHost || "") : ""
@@ -307,6 +314,7 @@ Panel {
       onTextKey: function(t) {
         if (t === "s" || t === "S") root.toggleServer()
         else if (t === "a" || t === "A") root.toggleAutostart()
+        else if (t === "g" || t === "G") root.toggleGaming()
         else if (t === "c" || t === "C") root.copy(root.ip !== "" ? root.ip : "", "Address")
         else if (t === "o" || t === "O") { Quickshell.execDetached(["deskflow"]); root.close() }
         else if (t === "l" || t === "L") root.openWindow("layout")
@@ -536,6 +544,35 @@ Panel {
         }
 
         PanelSeparator { visible: !root.needsSetup; foreground: root.foreground }
+
+        Row {
+          visible: !root.needsSetup && root.role === "server"
+          width: parent.width
+          spacing: Style.space(8)
+          Column {
+            width: parent.width - gamingSwitch.width - Style.space(8)
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(2)
+            Body { width: parent.width; text: "Gaming mode" }
+            Caption {
+              width: parent.width
+              text: root.gaming ? "Key repeat and the input method are off here, so games on the other computer get clean input."
+                                : "Turn on to play games on the other computer: stops held keys arriving as rapid taps, and stuck keys."
+            }
+          }
+          ToggleSwitch {
+            id: gamingSwitch
+            checked: root.gaming
+            busy: root.busy
+            foreground: root.foreground
+            onToggled: root.toggleGaming()
+            PanelToolTip {
+              visible: gamingSwitch.containsMouse
+              text: "Toggle gaming mode (G)"
+              fontFamily: root.fontFamily
+            }
+          }
+        }
 
         Row {
           visible: !root.needsSetup

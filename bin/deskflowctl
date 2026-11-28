@@ -16,8 +16,7 @@
 #   deskflowctl ddc-set <key> <desktop-code> <other-code|none>
 #   deskflowctl apply <layout-json> [--dry-run]
 #   deskflowctl preset list|apply <id>|save <layout-json>|delete <id>|reapply [--hypr-only]
-#                                         (a preset with "gaming": true turns off key repeat and
-#                                          fcitx5 while active; see "gaming presets" below)
+#   deskflowctl gaming on|off|toggle|status   key repeat + fcitx5 off for games on the other computer
 #   deskflowctl fetch-server-fingerprint <host>   (client)
 #   deskflowctl trust-server <fingerprint>        (client)
 #   deskflowctl pair                      (server) wait for an untrusted computer, print its fingerprint
@@ -157,16 +156,17 @@ current_preset() { cat "$state_dir/preset" 2>/dev/null; }
 # ---------------------------------------------------------------- monitors
 lua_config() { [ -f "$cfg_home/hypr/hyprland.lua" ]; }
 
-# ---------------------------------------------------------------- gaming presets
-# A preset marked "gaming" is for playing a game on the other computer. Two desktop features
+# ---------------------------------------------------------------- gaming mode
+# Gaming mode (the panel's switch) is for playing a game on the other computer. Two desktop features
 # break games while Deskflow holds the keyboard (Hyprland's input capture, as of 0.56):
 #  - Hyprland repeats held keys itself, as key-up + key-down pairs at input:repeat_rate. A game
 #    sees a held W as W tapped ~40 times a second (Call of Duty: "Client command overflow").
 #  - Each keymap change rebuilds the keyboard handed to Deskflow, losing the release of a key
 #    held at that moment, so the key stays down on the other computer. fcitx5 re-sends its
 #    keymap whenever focus moves.
-# While a gaming preset is active and Deskflow runs: key repeat is off and Omarchy's fcitx5 unit
-# is stopped. Both come back with any other preset or layout, or when Deskflow is switched off.
+# While gaming mode is on and Deskflow runs (as the server): key repeat is off and Omarchy's
+# fcitx5 unit is stopped. Both come back when gaming mode or Deskflow is switched off.
+gaming_flag=$state_dir/gaming
 gaming_repeat=$state_dir/gaming-repeat-rate
 gaming_fcitx=$state_dir/gaming-stopped-fcitx5
 fcitx_unit=omarchy-fcitx5.service
@@ -198,11 +198,18 @@ gaming_off() {
   fi
   return 0
 }
-preset_is_gaming() {
-  [ -n "${1:-}" ] && jq -e --arg id "$1" 'any(.presets[]; .id == $id and .gaming == true)' "$presets_file" >/dev/null 2>&1
+gaming_enabled() { [ -f "$gaming_flag" ]; }
+sync_gaming() { # make the desktop match the gaming switch and Deskflow's state
+  if gaming_enabled && running && [ "$(role)" = server ]; then gaming_on; else gaming_off; fi
 }
-sync_gaming() { # match gaming mode to the active preset
-  if running && preset_is_gaming "$(current_preset)"; then gaming_on; else gaming_off; fi
+gaming_cmd() {
+  case "${1:-status}" in
+    on) mkdir -p "$state_dir" && : > "$gaming_flag"; sync_gaming ;;
+    off) rm -f "$gaming_flag"; gaming_off ;;
+    toggle) if gaming_enabled; then gaming_cmd off; else gaming_cmd on; fi ;;
+    status) if gaming_enabled; then echo on; else echo off; exit 1; fi ;;
+    *) die "usage: deskflowctl gaming on|off|toggle|status" ;;
+  esac
 }
 
 # Hyprland's monitors, with a stable key (serial, else make+model+port), logical size,
@@ -435,7 +442,7 @@ slug() { tr '[:upper:]' '[:lower:]' <<<"$1" | sed 's/[^a-z0-9]\+/-/g; s/^-//; s/
 preset_cmd() {
   ensure_presets
   case "${1:-list}" in
-    list) jq -c --arg cur "$(current_preset)" '{current: $cur, presets: [.presets[] | {id, name, note: (.note // ""), gaming: (.gaming == true)}]}' "$presets_file" ;;
+    list) jq -c --arg cur "$(current_preset)" '{current: $cur, presets: [.presets[] | {id, name, note: (.note // "")}]}' "$presets_file" ;;
     get) jq -ce --arg id "${2:-}" '.presets[] | select(.id == $id)' "$presets_file" || die "unknown preset: ${2:-}" ;;
     apply)
       local id="${2:-}" p
@@ -444,7 +451,6 @@ preset_cmd() {
       apply_layout "$p" || return 1
       if [ -z "$dry" ]; then
         mkdir -p "$state_dir" && printf '%s\n' "$id" > "$state_dir/preset"
-        sync_gaming
         notify "Layout: $(jq -r .name <<<"$p")" "$(jq -r '.note // ""' <<<"$p")"
       fi ;;
     save)
@@ -454,18 +460,17 @@ preset_cmd() {
       id=$(jq -r '.id // ""' <<<"$layout"); [[ "$id" =~ ^[a-z0-9-]{1,40}$ ]] || id=$(slug "$name")
       [ -n "$id" ] || id=preset-$(date +%s)
       jq --argjson l "$layout" --arg id "$id" '
-        ($l | {id: $id, name, note: (.note // "" | .[0:240]), gaming: (.gaming == true), monitors, screens: (.screens // []), links: (.links // [])}) as $p
+        ($l | {id: $id, name, note: (.note // "" | .[0:240]), monitors, screens: (.screens // []), links: (.links // [])}) as $p
         | if any(.presets[]; .id == $id) then .presets |= map(if .id == $id then $p else . end)
           else .presets += [$p] end
         | .computers = ((.computers // {}) + ([ $l.screens[]? | {key: .name, value: {width, height}} ] | from_entries))
       ' "$presets_file" | write_presets || return 1
       # --current: the window saved exactly what it just applied.
       [ "${3:-}" = --current ] && mkdir -p "$state_dir" && printf '%s\n' "$id" > "$state_dir/preset"
-      sync_gaming
       echo "$id" ;;
     delete)
       jq --arg id "${2:-}" '.presets |= map(select(.id != $id))' "$presets_file" | write_presets
-      [ "$(current_preset)" = "${2:-}" ] && rm -f "$state_dir/preset"; sync_gaming; return 0 ;;
+      [ "$(current_preset)" = "${2:-}" ] && rm -f "$state_dir/preset"; return 0 ;;
     reapply)
       local id; id=$(current_preset); [ -n "$id" ] || return 0
       local p; p=$(jq -ce --arg id "$id" '.presets[] | select(.id == $id)' "$presets_file") || return 0
@@ -656,14 +661,14 @@ state() {
   jq -nc --argjson running "$r" --argjson autostart "$a" --arg role "$(role)" \
     --arg name "$name" --arg ip "$(lan_ip)" --argjson port "$port" --arg fp "$(fingerprint)" \
     --arg host "$(server_host)" --arg peers "$(peers)" --argjson links "${links_json:-{\}}" \
-    --arg preset "$(current_preset)" --argjson installed "$(have deskflow-core && echo true || echo false)" \
+    --arg preset "$(current_preset)" --argjson gaming "$(gaming_enabled && echo true || echo false)" --argjson installed "$(have deskflow-core && echo true || echo false)" \
     --argjson unit "$([ -f "$unit_file" ] && echo true || echo false)" \
     --slurpfile p "$presets_file" '
     def lines: split("\n") | map(select(length > 0));
     {running: $running, autostart: $autostart, role: $role, installed: $installed, unit: $unit,
      name: $name, ip: $ip, port: $port, fingerprint: $fp, serverHost: $host,
-     peers: ($peers | lines), links: $links, preset: $preset,
-     presets: [ $p[0].presets[] | {id, name, note: (.note // ""), gaming: (.gaming == true)} ]}'
+     peers: ($peers | lines), links: $links, preset: $preset, gaming: $gaming,
+     presets: [ $p[0].presets[] | {id, name, note: (.note // "")} ]}'
 }
 
 # ---------------------------------------------------------------- migration from the pre-1.0 plugin
@@ -769,9 +774,9 @@ case "${1:-state}" in
       if [ ! -s "$links_file" ] && [ -s "$df_dir/deskflow-server.conf" ]; then cp "$df_dir/deskflow-server.conf" "$links_file"; fi
       [ "$(role)" = server ] && [ -s "$links_file" ] && point_deskflow_at_links
     fi
-    # After a login or shell restart, put gaming mode back in step with the active preset.
+    # After a login or shell restart, put gaming mode back in step with its switch.
     # At login Deskflow's unit may still be starting, so give it a few seconds.
-    if preset_is_gaming "$(current_preset)"; then
+    if gaming_enabled; then
       for _ in 1 2 3 4 5 6 7 8 9 10; do running && break; sleep 1; done
       sync_gaming
     elif [ -e "$gaming_repeat" ] || [ -e "$gaming_fcitx" ]; then
@@ -791,9 +796,10 @@ case "${1:-state}" in
   monitors) monitors_cmd ;;
   ddc-probe) [[ "${2:-}" =~ ^[A-Za-z0-9._\ -]{1,64}$ ]] || die "bad serial"; ddc_probe "$2" ;;
   ddc-set) ddc_set "${2:-}" "${3:-}" "${4:-none}" ;;
-  apply) apply_layout "${2:-}" && [ -z "$dry" ] && rm -f "$state_dir/preset" && sync_gaming; true ;;
+  apply) apply_layout "${2:-}" && [ -z "$dry" ] && rm -f "$state_dir/preset"; true ;;
   links) render_links "${2:-}" ;;
   preset) shift; preset_cmd "$@" ;;
+  gaming) gaming_cmd "${2:-status}" ;;
   presets) preset_cmd list ;;
   fetch-server-fingerprint) fetch_server_fp "${2:-}" ;;
   trust-server) trust "$tls_dir/trusted-servers" "${2:-}"; restart_if_running ;;
