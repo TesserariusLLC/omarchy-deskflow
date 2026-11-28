@@ -46,7 +46,6 @@ Item {
   property string selKind: ""    // "monitor" | "computer" | ""
   property int selIndex: -1
   property string saveName: ""
-  property bool saveGaming: false   // the "Gaming" switch, saved with the preset
   property var probe: null       // {key, current, inputs: [{code, label}]}
   property bool probing: probeProc.running
 
@@ -126,7 +125,6 @@ Item {
     others = isServer ? os : []
     loadedPreset = p ? p.id : ""
     saveName = p ? p.name : ""
-    saveGaming = p ? p.gaming === true : false
     dirty = false
     probe = null
     if (selKind === "monitor" && selIndex >= monitors.length) selKind = ""
@@ -167,7 +165,7 @@ Item {
     if (name === "") { say("Give the preset a name first.", true); return }
     var sameAsLoaded = false
     for (var i = 0; i < presets.length; i++) if (presets[i].id === loadedPreset && presets[i].name === name) sameAsLoaded = true
-    var extra = { name: name, gaming: saveGaming }
+    var extra = { name: name }
     if (sameAsLoaded) extra.id = loadedPreset
     var args = ["preset", "save", layoutJson(extra)]
     if (!dirty) args.push("--current")
@@ -601,7 +599,7 @@ Item {
                     Column {
                       width: parent.width - applyBtn.width - delBtn.width - Style.space(12)
                       anchors.verticalCenter: parent.verticalCenter
-                      Label { width: parent.width; elide: Text.ElideRight; text: pcard.modelData.name + (pcard.modelData.gaming === true ? "   gaming" : "") + (pcard.isCurrent ? "   active" : ""); font.bold: true }
+                      Label { width: parent.width; elide: Text.ElideRight; text: pcard.modelData.name + (pcard.isCurrent ? "   active" : ""); font.bold: true }
                       Label { width: parent.width; elide: Text.ElideRight; color: root.dim; font.pixelSize: Style.font.caption; text: pcard.modelData.note || ""; visible: text !== "" }
                     }
                     Button {
@@ -621,13 +619,6 @@ Item {
                     }
                   }
                 }
-              }
-              SwitchRow {
-                width: parent.width
-                text: "Gaming"
-                detail: "For playing games on the other computer. While this preset is active, key repeat and the input method (fcitx5) are off on this desktop: Hyprland's repeat reaches games as rapid key taps, and fcitx5 can leave a key stuck down. Saved with the preset."
-                checked: root.saveGaming
-                onToggled: root.saveGaming = !root.saveGaming
               }
             }
           }
