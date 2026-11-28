@@ -64,6 +64,8 @@ Presets are stored in `~/.config/omarchy-deskflow/presets.json`. The plugin poin
 
 **What it's for.** Turn on **Gaming mode** in the panel (or press `G`) whenever you play a game on the other computer using this computer's keyboard and mouse. It works with whichever layout is active, so you don't need separate gaming presets. Typing, browsing and other everyday use on the other computer don't need it.
 
+**Lock the pointer with Scroll Lock while you play.** Move onto the other computer, then press **Scroll Lock** (ScrLk) on this computer's keyboard. Deskflow then keeps the mouse and keyboard on the other computer until you press Scroll Lock again. Without the lock, a fast flick or a game recentring the mouse can push the pointer over an edge mid-game. From then on your mouse and keys go to this desktop, and the game stops seeing your input. Unlock with Scroll Lock before moving back. Gaming mode and Scroll Lock do different jobs, so use both.
+
 **What can happen if it's off while you play.** Both problems come from how Hyprland hands the keyboard to Deskflow, so they only happen over Deskflow, never with a keyboard plugged into the other computer:
 
 - **The game disconnects you or acts as if you're spamming keys.** Hyprland repeats a held key by sending key-up and key-down about 40 times a second, so the game sees a held movement key as rapid taps. Call of Duty kicks you with "Client command overflow". Other games may stutter or drop input.
@@ -73,6 +75,8 @@ Presets are stored in `~/.config/omarchy-deskflow/presets.json`. The plugin poin
 
 - Holding a key types it once instead of repeating, on both computers. For example, holding Backspace deletes one character.
 - Shift+CapsLock compose sequences and other fcitx5 input methods, such as Chinese, Japanese or Korean input, don't work.
+
+The plugin restarts Deskflow when gaming mode switches on or off. It also restarts it after any Hyprland config reload, whether gaming mode is on or not. Each of these rebuilds this desktop's keyboard, and Deskflow would otherwise keep using the old one. You'll see the other computer reconnect for a moment. If the pointer reaches the other computer but your typing doesn't, switch Deskflow off and on in the panel.
 
 Turn it off when you're done gaming. Switching Deskflow off also puts key repeat and fcitx5 back. The switch is remembered, so it applies again the next time Deskflow starts, including after a reboot.
 

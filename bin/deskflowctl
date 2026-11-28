@@ -174,38 +174,59 @@ hypr_repeat() { # rate
   if lua_config; then hyprctl eval "hl.config({ input = { repeat_rate = $1 } })" >/dev/null
   else hyprctl keyword input:repeat_rate "$1" >/dev/null; fi
 }
+# Changing key repeat or stopping/starting fcitx5 rebuilds Hyprland's keyboard, and Deskflow
+# keeps the old one: the pointer still crosses but keys stop reaching the other computer.
+# So every function here notes what it changed, and the caller restarts Deskflow after.
+gaming_changed=""
+hypr_repeat_now() { hyprctl getoption input:repeat_rate -j 2>/dev/null | jq -r '.int // empty'; }
+fcitx_keyboard_up() { hyprctl devices -j 2>/dev/null | jq -e '[.keyboards[].name] | any(test("fcitx"))' >/dev/null; }
 gaming_on() {
   have hyprctl || return 0
   mkdir -p "$state_dir"
-  if [ ! -f "$gaming_repeat" ]; then
-    local r; r=$(hyprctl getoption input:repeat_rate -j 2>/dev/null | jq -r '.int // empty')
-    [[ "$r" =~ ^[0-9]+$ ]] && [ "$r" -gt 0 ] && printf '%s\n' "$r" > "$gaming_repeat"
+  local r; r=$(hypr_repeat_now)
+  if [ ! -f "$gaming_repeat" ] && [[ "$r" =~ ^[0-9]+$ ]] && [ "$r" -gt 0 ]; then
+    printf '%s\n' "$r" > "$gaming_repeat"
   fi
-  hypr_repeat 0
+  if [ "$r" != 0 ]; then hypr_repeat 0; gaming_changed=1; fi
   if systemctl --user is-active --quiet "$fcitx_unit"; then
-    systemctl --user stop "$fcitx_unit" && : > "$gaming_fcitx"
+    systemctl --user stop "$fcitx_unit" && : > "$gaming_fcitx" && gaming_changed=1
   fi
   return 0
 }
 gaming_off() {
   if [ -f "$gaming_repeat" ]; then
     local r; r=$(cat "$gaming_repeat")
-    [[ "$r" =~ ^[0-9]+$ ]] && have hyprctl && hypr_repeat "$r"
+    if [[ "$r" =~ ^[0-9]+$ ]] && have hyprctl && [ "$(hypr_repeat_now)" != "$r" ]; then
+      hypr_repeat "$r"; gaming_changed=1
+    fi
     rm -f "$gaming_repeat"
   fi
   if [ -f "$gaming_fcitx" ]; then
-    systemctl --user start "$fcitx_unit" 2>/dev/null; rm -f "$gaming_fcitx"
+    rm -f "$gaming_fcitx"
+    if systemctl --user start "$fcitx_unit" 2>/dev/null; then
+      gaming_changed=1
+      # fcitx5 adds its virtual keyboard a moment after starting; wait so the
+      # Deskflow restart that follows comes after that keyboard change too.
+      for _ in 1 2 3 4 5 6 7 8 9 10; do fcitx_keyboard_up && break; sleep 0.3; done
+    fi
   fi
   return 0
+}
+# Restart Deskflow if the keyboard was rebuilt while it ran (or "force": Hyprland reloaded).
+refresh_deskflow_keyboard() {
+  { [ -n "$gaming_changed" ] || [ "${1:-}" = force ]; } && running || return 0
+  sleep 0.3; systemctl --user restart "$unit"
+  gaming_changed=""
 }
 gaming_enabled() { [ -f "$gaming_flag" ]; }
 sync_gaming() { # make the desktop match the gaming switch and Deskflow's state
   if gaming_enabled && running && [ "$(role)" = server ]; then gaming_on; else gaming_off; fi
+  refresh_deskflow_keyboard
 }
 gaming_cmd() {
   case "${1:-status}" in
     on) mkdir -p "$state_dir" && : > "$gaming_flag"; sync_gaming ;;
-    off) rm -f "$gaming_flag"; gaming_off ;;
+    off) rm -f "$gaming_flag"; gaming_off; refresh_deskflow_keyboard ;;
     toggle) if gaming_enabled; then gaming_cmd off; else gaming_cmd on; fi ;;
     status) if gaming_enabled; then echo on; else echo off; exit 1; fi ;;
     *) die "usage: deskflowctl gaming on|off|toggle|status" ;;
@@ -472,10 +493,15 @@ preset_cmd() {
       jq --arg id "${2:-}" '.presets |= map(select(.id != $id))' "$presets_file" | write_presets
       [ "$(current_preset)" = "${2:-}" ] && rm -f "$state_dir/preset"; return 0 ;;
     reapply)
-      local id; id=$(current_preset); [ -n "$id" ] || return 0
-      local p; p=$(jq -ce --arg id "$id" '.presets[] | select(.id == $id)' "$presets_file") || return 0
-      apply_layout "$p" "$([ "${2:-}" = --hypr-only ] && echo 1)"
-      sync_gaming ;;
+      # Called by the plugin after a Hyprland config reload (--hypr-only).
+      local id p; id=$(current_preset)
+      if [ -n "$id" ] && p=$(jq -ce --arg id "$id" '.presets[] | select(.id == $id)' "$presets_file"); then
+        ( apply_layout "$p" "$([ "${2:-}" = --hypr-only ] && echo 1)" )
+      fi
+      sync_gaming
+      # A reload rebuilds Hyprland's keyboards, which leaves Deskflow with a dead one.
+      [ "${2:-}" = --hypr-only ] && refresh_deskflow_keyboard force
+      return 0 ;;
     *) die "usage: deskflowctl preset list|apply <id>|save <json>|delete <id>|reapply [--hypr-only]" ;;
   esac
 }
