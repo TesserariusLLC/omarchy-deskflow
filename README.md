@@ -57,6 +57,11 @@ Not possible on Hyprland yet; see the note at the top. On a desktop whose portal
 - Deskflow treats each computer as one rectangle: the outline around all of its monitors. Monitors from different computers can't alternate left to right. To get that arrangement, hand the middle monitor to the other computer with input switching.
 - A computer's size only changes where along an edge the pointer crosses. If Deskflow logs a computer's size (Debug log level), the window offers it.
 - A Hyprland config reload brings every monitor back to its configured position. The plugin then re-applies the active preset's positions, but not its input switching.
+- **Gaming presets.** Turn on **Gaming** under Presets before saving a preset you use to play games on the other computer. While that preset is active, the plugin turns off key repeat on this desktop and stops fcitx5 (Omarchy's `omarchy-fcitx5` unit). Both come back when you pick another preset or layout, or switch Deskflow off. Without this, games on the other computer misbehave in two ways:
+  - Hyprland repeats a held key by sending key-up and key-down about 40 times a second, so a game sees a held key as rapid taps. Call of Duty can disconnect you with "Client command overflow".
+  - Each time a keyboard's keymap changes, Hyprland rebuilds the keyboard it hands to Deskflow. A key held at that moment never gets its release, so it stays down on the other computer. fcitx5 changes its keymap whenever focus moves.
+
+  While a gaming preset is active, keys held on this desktop don't repeat, and Shift+CapsLock compose sequences don't work.
 
 Presets are stored in `~/.config/omarchy-deskflow/presets.json`. The plugin points Deskflow at `~/.config/omarchy-deskflow/deskflow-server.conf`.
 
