@@ -16,6 +16,8 @@
 #   deskflowctl ddc-set <key> <desktop-code> <other-code|none>
 #   deskflowctl apply <layout-json> [--dry-run]
 #   deskflowctl preset list|apply <id>|save <layout-json>|delete <id>|reapply [--hypr-only]
+#                                         (a preset with "gaming": true turns off key repeat and
+#                                          fcitx5 while active; see "gaming presets" below)
 #   deskflowctl fetch-server-fingerprint <host>   (client)
 #   deskflowctl trust-server <fingerprint>        (client)
 #   deskflowctl pair                      (server) wait for an untrusted computer, print its fingerprint
@@ -154,6 +156,54 @@ current_preset() { cat "$state_dir/preset" 2>/dev/null; }
 
 # ---------------------------------------------------------------- monitors
 lua_config() { [ -f "$cfg_home/hypr/hyprland.lua" ]; }
+
+# ---------------------------------------------------------------- gaming presets
+# A preset marked "gaming" is for playing a game on the other computer. Two desktop features
+# break games while Deskflow holds the keyboard (Hyprland's input capture, as of 0.56):
+#  - Hyprland repeats held keys itself, as key-up + key-down pairs at input:repeat_rate. A game
+#    sees a held W as W tapped ~40 times a second (Call of Duty: "Client command overflow").
+#  - Each keymap change rebuilds the keyboard handed to Deskflow, losing the release of a key
+#    held at that moment, so the key stays down on the other computer. fcitx5 re-sends its
+#    keymap whenever focus moves.
+# While a gaming preset is active and Deskflow runs: key repeat is off and Omarchy's fcitx5 unit
+# is stopped. Both come back with any other preset or layout, or when Deskflow is switched off.
+gaming_repeat=$state_dir/gaming-repeat-rate
+gaming_fcitx=$state_dir/gaming-stopped-fcitx5
+fcitx_unit=omarchy-fcitx5.service
+hypr_repeat() { # rate
+  if lua_config; then hyprctl eval "hl.config({ input = { repeat_rate = $1 } })" >/dev/null
+  else hyprctl keyword input:repeat_rate "$1" >/dev/null; fi
+}
+gaming_on() {
+  have hyprctl || return 0
+  mkdir -p "$state_dir"
+  if [ ! -f "$gaming_repeat" ]; then
+    local r; r=$(hyprctl getoption input:repeat_rate -j 2>/dev/null | jq -r '.int // empty')
+    [[ "$r" =~ ^[0-9]+$ ]] && [ "$r" -gt 0 ] && printf '%s\n' "$r" > "$gaming_repeat"
+  fi
+  hypr_repeat 0
+  if systemctl --user is-active --quiet "$fcitx_unit"; then
+    systemctl --user stop "$fcitx_unit" && : > "$gaming_fcitx"
+  fi
+  return 0
+}
+gaming_off() {
+  if [ -f "$gaming_repeat" ]; then
+    local r; r=$(cat "$gaming_repeat")
+    [[ "$r" =~ ^[0-9]+$ ]] && have hyprctl && hypr_repeat "$r"
+    rm -f "$gaming_repeat"
+  fi
+  if [ -f "$gaming_fcitx" ]; then
+    systemctl --user start "$fcitx_unit" 2>/dev/null; rm -f "$gaming_fcitx"
+  fi
+  return 0
+}
+preset_is_gaming() {
+  [ -n "${1:-}" ] && jq -e --arg id "$1" 'any(.presets[]; .id == $id and .gaming == true)' "$presets_file" >/dev/null 2>&1
+}
+sync_gaming() { # match gaming mode to the active preset
+  if running && preset_is_gaming "$(current_preset)"; then gaming_on; else gaming_off; fi
+}
 
 # Hyprland's monitors, with a stable key (serial, else make+model+port), logical size,
 # and the last-seen mode remembered for monitors that are switched off right now.
@@ -385,7 +435,7 @@ slug() { tr '[:upper:]' '[:lower:]' <<<"$1" | sed 's/[^a-z0-9]\+/-/g; s/^-//; s/
 preset_cmd() {
   ensure_presets
   case "${1:-list}" in
-    list) jq -c --arg cur "$(current_preset)" '{current: $cur, presets: [.presets[] | {id, name, note: (.note // "")}]}' "$presets_file" ;;
+    list) jq -c --arg cur "$(current_preset)" '{current: $cur, presets: [.presets[] | {id, name, note: (.note // ""), gaming: (.gaming == true)}]}' "$presets_file" ;;
     get) jq -ce --arg id "${2:-}" '.presets[] | select(.id == $id)' "$presets_file" || die "unknown preset: ${2:-}" ;;
     apply)
       local id="${2:-}" p
@@ -394,6 +444,7 @@ preset_cmd() {
       apply_layout "$p" || return 1
       if [ -z "$dry" ]; then
         mkdir -p "$state_dir" && printf '%s\n' "$id" > "$state_dir/preset"
+        sync_gaming
         notify "Layout: $(jq -r .name <<<"$p")" "$(jq -r '.note // ""' <<<"$p")"
       fi ;;
     save)
@@ -403,21 +454,23 @@ preset_cmd() {
       id=$(jq -r '.id // ""' <<<"$layout"); [[ "$id" =~ ^[a-z0-9-]{1,40}$ ]] || id=$(slug "$name")
       [ -n "$id" ] || id=preset-$(date +%s)
       jq --argjson l "$layout" --arg id "$id" '
-        ($l | {id: $id, name, note: (.note // "" | .[0:240]), monitors, screens: (.screens // []), links: (.links // [])}) as $p
+        ($l | {id: $id, name, note: (.note // "" | .[0:240]), gaming: (.gaming == true), monitors, screens: (.screens // []), links: (.links // [])}) as $p
         | if any(.presets[]; .id == $id) then .presets |= map(if .id == $id then $p else . end)
           else .presets += [$p] end
         | .computers = ((.computers // {}) + ([ $l.screens[]? | {key: .name, value: {width, height}} ] | from_entries))
       ' "$presets_file" | write_presets || return 1
       # --current: the window saved exactly what it just applied.
       [ "${3:-}" = --current ] && mkdir -p "$state_dir" && printf '%s\n' "$id" > "$state_dir/preset"
+      sync_gaming
       echo "$id" ;;
     delete)
       jq --arg id "${2:-}" '.presets |= map(select(.id != $id))' "$presets_file" | write_presets
-      [ "$(current_preset)" = "${2:-}" ] && rm -f "$state_dir/preset"; return 0 ;;
+      [ "$(current_preset)" = "${2:-}" ] && rm -f "$state_dir/preset"; sync_gaming; return 0 ;;
     reapply)
       local id; id=$(current_preset); [ -n "$id" ] || return 0
       local p; p=$(jq -ce --arg id "$id" '.presets[] | select(.id == $id)' "$presets_file") || return 0
-      apply_layout "$p" "$([ "${2:-}" = --hypr-only ] && echo 1)" ;;
+      apply_layout "$p" "$([ "${2:-}" = --hypr-only ] && echo 1)"
+      sync_gaming ;;
     *) die "usage: deskflowctl preset list|apply <id>|save <json>|delete <id>|reapply [--hypr-only]" ;;
   esac
 }
@@ -610,7 +663,7 @@ state() {
     {running: $running, autostart: $autostart, role: $role, installed: $installed, unit: $unit,
      name: $name, ip: $ip, port: $port, fingerprint: $fp, serverHost: $host,
      peers: ($peers | lines), links: $links, preset: $preset,
-     presets: [ $p[0].presets[] | {id, name, note: (.note // "")} ]}'
+     presets: [ $p[0].presets[] | {id, name, note: (.note // ""), gaming: (.gaming == true)} ]}'
 }
 
 # ---------------------------------------------------------------- migration from the pre-1.0 plugin
@@ -668,9 +721,9 @@ fi
 
 case "${1:-state}" in
   state|json) state ;;
-  on|start) start ;;
-  off|stop) stop ;;
-  toggle) if running; then stop; else start; fi ;;
+  on|start) start && sync_gaming ;;
+  off|stop) stop; gaming_off ;;
+  toggle) if running; then stop; gaming_off; else start && sync_gaming; fi ;;
   status) if running; then echo on; else echo off; exit 1; fi ;;
   autostart)
     case "${2:-status}" in
@@ -716,6 +769,14 @@ case "${1:-state}" in
       if [ ! -s "$links_file" ] && [ -s "$df_dir/deskflow-server.conf" ]; then cp "$df_dir/deskflow-server.conf" "$links_file"; fi
       [ "$(role)" = server ] && [ -s "$links_file" ] && point_deskflow_at_links
     fi
+    # After a login or shell restart, put gaming mode back in step with the active preset.
+    # At login Deskflow's unit may still be starting, so give it a few seconds.
+    if preset_is_gaming "$(current_preset)"; then
+      for _ in 1 2 3 4 5 6 7 8 9 10; do running && break; sleep 1; done
+      sync_gaming
+    elif [ -e "$gaming_repeat" ] || [ -e "$gaming_fcitx" ]; then
+      gaming_off
+    fi
     true ;;
   cert) make_cert ;;
   unit) write_unit ;;
@@ -730,7 +791,7 @@ case "${1:-state}" in
   monitors) monitors_cmd ;;
   ddc-probe) [[ "${2:-}" =~ ^[A-Za-z0-9._\ -]{1,64}$ ]] || die "bad serial"; ddc_probe "$2" ;;
   ddc-set) ddc_set "${2:-}" "${3:-}" "${4:-none}" ;;
-  apply) apply_layout "${2:-}" && [ -z "$dry" ] && rm -f "$state_dir/preset"; true ;;
+  apply) apply_layout "${2:-}" && [ -z "$dry" ] && rm -f "$state_dir/preset" && sync_gaming; true ;;
   links) render_links "${2:-}" ;;
   preset) shift; preset_cmd "$@" ;;
   presets) preset_cmd list ;;
