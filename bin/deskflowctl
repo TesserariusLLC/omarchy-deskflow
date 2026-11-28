@@ -17,6 +17,7 @@
 #   deskflowctl apply <layout-json> [--dry-run]
 #   deskflowctl preset list|apply <id>|save <layout-json>|delete <id>|reapply [--hypr-only]
 #   deskflowctl unlock                    release a Scroll Lock (restarts the service)
+#   deskflowctl lock-warning NAME         notify if gaming mode is off while locked to NAME
 #   deskflowctl gaming on|off|toggle|status   key repeat + fcitx5 off for games on the other computer
 #   deskflowctl fetch-server-fingerprint <host>   (client)
 #   deskflowctl trust-server <fingerprint>        (client)
@@ -686,7 +687,25 @@ lock_state() {
         /switch from "|jump from "/ { if (match($0, /to "[^"]*"/)) on = substr($0, RSTART + 4, RLENGTH - 5) }
         /cursor locked / { locked = 1 }
         /cursor unlocked / { locked = 0 }
-        END { gsub(/[^A-Za-z0-9._-]/, "", on); printf "{\"locked\":%s,\"on\":\"%s\"}\n", locked ? "true" : "false", on }'
+        END {
+          gsub(/[^A-Za-z0-9._-]/, "", on)
+          # Locked on this computer: the other side dropped while the pointer was locked there.
+          # The key cannot undo it here: Wayland only forwards keys from another computer.
+          printf "{\"locked\":%s,\"on\":\"%s\",\"stranded\":%s}\n", locked ? "true" : "false", on, (locked && on == me) ? "true" : "false"
+        }'
+}
+
+# Scroll Lock just locked the pointer to another computer with gaming mode off: games there
+# get held keys as rapid taps. Offer to switch it on. Runs in the background (notify-send waits).
+lock_warning() { # computer
+  gaming_enabled && return 0
+  [ "$(role)" = server ] && have notify-send || return 0
+  local who=${1//[^A-Za-z0-9._-]/}
+  setsid bash -c '
+    a=$(notify-send -a Deskflow -i input-gaming -u normal -A on="Turn on gaming mode" \
+      "Gaming mode is off" "The pointer is locked to ${1:-the other computer}. Held keys can get stuck in games there. Turning it on restarts Deskflow, so press Scroll Lock again afterwards.")
+    [ "$a" = on ] && "$0" gaming on
+  ' "$0" "$who" </dev/null >/dev/null 2>&1 &
 }
 
 state() {
@@ -848,6 +867,7 @@ case "${1:-state}" in
   # another computer, so a lock that ends up on this one (the other computer disconnected while
   # locked) can't be undone with the key. Restarting the service clears it.
   unlock) running && systemctl --user restart "$unit"; true ;;
+  lock-warning) lock_warning "${2:-}" ;;
   presets) preset_cmd list ;;
   fetch-server-fingerprint) fetch_server_fp "${2:-}" ;;
   trust-server) trust "$tls_dir/trusted-servers" "${2:-}"; restart_if_running ;;
