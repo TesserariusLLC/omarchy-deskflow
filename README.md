@@ -62,14 +62,19 @@ Presets are stored in `~/.config/omarchy-deskflow/presets.json`. The plugin poin
 
 ## Gaming mode
 
-Turn on **Gaming mode** in the panel (or press `G`) before playing a game on the other computer. It works with whichever layout is active. While it's on and Deskflow is running, the plugin turns off key repeat on this desktop and stops fcitx5 (Omarchy's `omarchy-fcitx5` unit). Switching gaming mode or Deskflow off puts both back. The switch is remembered, so it applies again the next time Deskflow starts.
+**What it's for.** Turn on **Gaming mode** in the panel (or press `G`) whenever you play a game on the other computer using this computer's keyboard and mouse. It works with whichever layout is active, so you don't need separate gaming presets. Typing, browsing and other everyday use on the other computer don't need it.
 
-Without it, games on the other computer misbehave in two ways, both caused by Hyprland's input capture:
+**What can happen if it's off while you play.** Both problems come from how Hyprland hands the keyboard to Deskflow, so they only happen over Deskflow, never with a keyboard plugged into the other computer:
 
-- Hyprland repeats a held key by sending key-up and key-down about 40 times a second, so a game sees a held key as rapid taps. Call of Duty can disconnect you with "Client command overflow".
-- Each time a keyboard's keymap changes, Hyprland rebuilds the keyboard it hands to Deskflow. A key held at that moment never gets its release, so it stays down on the other computer. fcitx5 changes its keymap whenever focus moves.
+- **The game disconnects you or acts as if you're spamming keys.** Hyprland repeats a held key by sending key-up and key-down about 40 times a second, so the game sees a held movement key as rapid taps. Call of Duty kicks you with "Client command overflow". Other games may stutter or drop input.
+- **A key gets stuck, or the keyboard stops working on the other computer.** Each time a keyboard's keymap changes, Hyprland rebuilds the keyboard it hands to Deskflow. A key you're holding at that moment never gets its release, so your character keeps walking until you press that key again on the other computer's own keyboard. Sometimes the other computer stops getting your keystrokes at all while the mouse still works. fcitx5 changes its keymap whenever focus moves on this desktop. A window opening or taking focus here mid-game can set it off, for example a notification, a dialog, or an app that runs its own display like Waydroid.
 
-While gaming mode is on, keys held on this desktop don't repeat, and Shift+CapsLock compose sequences and other fcitx5 input methods don't work.
+**What it changes.** While gaming mode is on and Deskflow is running, the plugin turns off key repeat on this desktop and stops fcitx5 (Omarchy's `omarchy-fcitx5` unit). Moving between monitors and computers works as normal. The trade-offs:
+
+- Holding a key types it once instead of repeating, on both computers. For example, holding Backspace deletes one character.
+- Shift+CapsLock compose sequences and other fcitx5 input methods, such as Chinese, Japanese or Korean input, don't work.
+
+Turn it off when you're done gaming. Switching Deskflow off also puts key repeat and fcitx5 back. The switch is remembered, so it applies again the next time Deskflow starts, including after a reboot.
 
 ## Files it touches
 
