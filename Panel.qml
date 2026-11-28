@@ -75,7 +75,7 @@ Panel {
     : (clients === 0 ? "On, waiting for " + (clientScreens.length === 1 ? clientScreens[0] : "computers")
     : (clients === 1 && clientScreens.length === 1 ? "On, " + clientScreens[0] + " connected"
     : "On, " + clients + " connected"))
-    + (locked && !isClient ? " · pointer locked" + (lockedOn !== "" ? " to " + lockedOn : "") : "")
+  readonly property string lockText: locked && !isClient ? "pointer locked" + (lockedOn !== "" ? " to " + lockedOn : "") : ""
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -200,7 +200,7 @@ Panel {
     function close(): void { root.close() }
     function toggle(): void { root.toggleServer() }
     function preset(id: string): void { root.applyPreset(id) }
-    function status(): string { return root.statusText }
+    function status(): string { return root.statusText + (root.lockText !== "" ? ", " + root.lockText : "") }
   }
 
   BarIconButton {
@@ -209,7 +209,7 @@ Panel {
     bar: root.bar
     text: root.locked ? root.lockGlyph : root.glyph
     foreground: root.locked ? root.accent : (root.running ? root.barForeground : Qt.darker(root.barForeground, 1.55))
-    tooltipText: "Deskflow: " + root.statusText
+    tooltipText: "Deskflow: " + root.statusText + (root.lockText !== "" ? " · " + root.lockText + " (Scroll Lock)" : "")
     onPressed: function(b) {
       if (b === Qt.MiddleButton) root.toggleServer()
       else if (b === Qt.RightButton) root.refresh()
