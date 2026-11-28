@@ -16,6 +16,7 @@
 #   deskflowctl ddc-set <key> <desktop-code> <other-code|none>
 #   deskflowctl apply <layout-json> [--dry-run]
 #   deskflowctl preset list|apply <id>|save <layout-json>|delete <id>|reapply [--hypr-only]
+#   deskflowctl unlock                    release a Scroll Lock (restarts the service)
 #   deskflowctl gaming on|off|toggle|status   key repeat + fcitx5 off for games on the other computer
 #   deskflowctl fetch-server-fingerprint <host>   (client)
 #   deskflowctl trust-server <fingerprint>        (client)
@@ -843,6 +844,10 @@ case "${1:-state}" in
   links) render_links "${2:-}" ;;
   preset) shift; preset_cmd "$@" ;;
   gaming) gaming_cmd "${2:-status}" ;;
+  # Release Deskflow's Scroll Lock. On Wayland the server only sees keys while the pointer is on
+  # another computer, so a lock that ends up on this one (the other computer disconnected while
+  # locked) can't be undone with the key. Restarting the service clears it.
+  unlock) running && systemctl --user restart "$unit"; true ;;
   presets) preset_cmd list ;;
   fetch-server-fingerprint) fetch_server_fp "${2:-}" ;;
   trust-server) trust "$tls_dir/trusted-servers" "${2:-}"; restart_if_running ;;

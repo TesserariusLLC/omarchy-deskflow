@@ -411,7 +411,16 @@ Panel {
             Body { width: parent.width; font.bold: true; wrapMode: Text.WordWrap
                    text: root.lockGlyph + "  Pointer locked to " + (root.lockedOn !== "" ? root.lockedOn : "one computer") }
             Caption { width: parent.width
-                      text: "Scroll Lock is on, so the mouse and keyboard can't move to another computer. Press Scroll Lock to release them." }
+                      text: root.lockedOn === root.serverName || root.lockedOn === ""
+                        ? "Scroll Lock is on and holding the pointer here. The Scroll Lock key only works while the pointer is on another computer, so use Release."
+                        : "Scroll Lock is on, so the mouse and keyboard stay on " + root.lockedOn + ". Press Scroll Lock there to release them, or use Release." }
+            Button {
+              text: "Release"
+              tooltipText: "Release the lock (restarts Deskflow)"
+              enabled: !root.busy
+              bordered: true; foreground: root.foreground; fontFamily: root.fontFamily; fontSize: Style.font.bodySmall
+              onClicked: { root.locked = false; root.run(["unlock"]) }
+            }
           }
         }
 
