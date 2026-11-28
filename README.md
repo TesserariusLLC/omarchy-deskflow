@@ -72,12 +72,14 @@ Turn on **Gaming mode** in the panel (or press `G`) when you play games on anoth
 
 ### Why games need it
 
-Hyprland passes the keyboard to Deskflow in a way that games don't handle well. Everyday typing doesn't notice, but games do:
+Hyprland passes your input to Deskflow in a way that games don't handle well. Everyday typing doesn't notice, but games do:
 
 - **Held keys arrive as rapid taps.** Hyprland repeats a held key by sending key-up and key-down at your key repeat rate, about 25–40 times a second. A game sees a held movement key being tapped over and over. Depending on the game, you get stuttering movement, dropped input, or an anti-spam disconnect. Call of Duty, for example, kicks you with "Client command overflow".
 - **Keys get stuck, or the keyboard stops reaching the other computer.** When any keyboard's keymap changes on this desktop, Hyprland rebuilds the keyboard it hands to Deskflow. A key held at that moment never gets its release, so it stays down on the other computer until you press it again there. The input method fcitx5 changes its keymap whenever focus moves on this desktop. So a notification, a dialog, or an app taking focus here mid-game can trigger it.
 
-None of this happens with a keyboard plugged straight into the other computer.
+- **One scroll-wheel notch turns into many.** Gaming mode can't fix this one. Over Deskflow, a single notch of the mouse wheel can reach the other computer as several wheel clicks. Hyprland reports each wheel step to Deskflow twice, with one value in the wrong unit, and Deskflow 1.27 adds the two together. Mice with high-resolution wheels, which split each notch into several smaller steps, make it much worse: many Logitech mice do, often around 8 steps per notch. If a game uses the wheel for something like switching weapons, one scroll can trigger it dozens of times. Call of Duty, for example, then disconnects you with "Client command overflow". Bind those actions to a key or mouse button instead. Buttons arrive correctly.
+
+None of this happens with a keyboard and mouse plugged straight into the other computer.
 
 ### What it changes
 
