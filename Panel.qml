@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls as QQC
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -25,6 +26,7 @@ Panel {
   readonly property color accent: Color.accent
   readonly property string fontFamily: (bar && bar.fontFamily) ? bar.fontFamily : Style.font.family
   readonly property string glyph: "\u{f037a}"      // nf-md-monitor_multiple
+  readonly property string lockGlyph: "\u{f033e}"  // nf-md-lock
   readonly property string copyGlyph: "\u{f018f}"  // nf-md-content_copy
 
   property bool loaded: false
@@ -48,6 +50,9 @@ Panel {
   property string copied: ""
   property string preset: ""
   property bool gaming: false
+  // Deskflow's Scroll Lock: the pointer can't leave lockedOn until Scroll Lock is pressed again.
+  property bool locked: false
+  property string lockedOn: ""
   property var presets: []
   property bool presetsOpen: false
   property string pendingPreset: ""
@@ -71,6 +76,7 @@ Panel {
     : (clients === 0 ? "On, waiting for " + (clientScreens.length === 1 ? clientScreens[0] : "computers")
     : (clients === 1 && clientScreens.length === 1 ? "On, " + clientScreens[0] + " connected"
     : "On, " + clients + " connected"))
+  readonly property string lockText: locked && !isClient ? "pointer locked" + (lockedOn !== "" ? " to " + lockedOn : "") : ""
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -138,6 +144,9 @@ Panel {
           root.running = s.running === true
           root.autostart = s.autostart === true
           root.gaming = s.gaming === true
+          var lk = s.lock || {}
+          root.locked = root.running && lk.locked === true
+          root.lockedOn = /^[A-Za-z0-9._-]{0,64}$/.test(String(lk.on || "")) ? String(lk.on || "") : ""
           root.role = /^(server|client|none)$/.test(String(s.role)) ? String(s.role) : "none"
           root.installed = s.installed !== false
           root.serverHost = /^[A-Za-z0-9._:-]{0,253}$/.test(String(s.serverHost || "")) ? String(s.serverHost || "") : ""
@@ -192,16 +201,16 @@ Panel {
     function close(): void { root.close() }
     function toggle(): void { root.toggleServer() }
     function preset(id: string): void { root.applyPreset(id) }
-    function status(): string { return root.statusText }
+    function status(): string { return root.statusText + (root.lockText !== "" ? ", " + root.lockText : "") }
   }
 
   BarIconButton {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.glyph
-    foreground: root.running ? root.barForeground : Qt.darker(root.barForeground, 1.55)
-    tooltipText: "Deskflow: " + root.statusText
+    text: root.locked ? root.lockGlyph : root.glyph
+    foreground: root.locked ? root.accent : (root.running ? root.barForeground : Qt.darker(root.barForeground, 1.55))
+    tooltipText: "Deskflow: " + root.statusText + (root.lockText !== "" ? " · " + root.lockText + " (Scroll Lock)" : "")
     onPressed: function(b) {
       if (b === Qt.MiddleButton) root.toggleServer()
       else if (b === Qt.RightButton) root.refresh()
@@ -249,7 +258,7 @@ Panel {
         font.bold: true
         color: card.current ? root.foreground : root.dim
       }
-      Caption { width: parent.width; text: card.preset.note; visible: card.preset.note !== ""; maximumLineCount: card.current ? 6 : 1; elide: Text.ElideRight }
+      Caption { width: parent.width; text: card.preset.note; visible: card.preset.note !== ""; maximumLineCount: card.current ? 3 : 1; elide: Text.ElideRight }
     }
     MouseArea {
       id: cardMouse
@@ -304,7 +313,7 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(360))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(800))
+    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(1000))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -389,6 +398,33 @@ Panel {
           }
         }
 
+        BorderSurface {
+          visible: root.locked && !root.isClient
+          width: parent.width
+          implicitHeight: lockCol.implicitHeight + Style.space(16)
+          radius: Style.cornerRadius
+          color: Style.selectedFillFor(root.foreground, root.accent)
+          borderSpec: Border.controlSpec("selected", root.foreground, root.accent)
+          Column {
+            id: lockCol
+            anchors { left: parent.left; right: parent.right; verticalCenter: parent.verticalCenter; leftMargin: Style.space(10); rightMargin: Style.space(10) }
+            spacing: Style.space(2)
+            Body { width: parent.width; font.bold: true; wrapMode: Text.WordWrap
+                   text: root.lockGlyph + "  Pointer locked to " + (root.lockedOn !== "" ? root.lockedOn : "one computer") }
+            Caption { width: parent.width
+                      text: root.lockedOn === root.serverName || root.lockedOn === ""
+                        ? "Scroll Lock is on and holding the pointer here. The Scroll Lock key only works while the pointer is on another computer, so use Release."
+                        : "Scroll Lock is on, so the mouse and keyboard stay on " + root.lockedOn + ". Press Scroll Lock there to release them, or use Release." }
+            Button {
+              text: "Release"
+              tooltipText: "Release the lock (restarts Deskflow)"
+              enabled: !root.busy
+              bordered: true; foreground: root.foreground; fontFamily: root.fontFamily; fontSize: Style.font.bodySmall
+              onClicked: { root.locked = false; root.run(["unlock"]) }
+            }
+          }
+        }
+
         PanelSeparator { visible: !root.needsSetup; foreground: root.foreground }
 
         // ── Layout presets drawer.
@@ -416,13 +452,57 @@ Panel {
             visible: root.presetsOpen
             width: parent.width
             spacing: Style.space(6)
-            Repeater {
-              model: root.presets
-              delegate: PresetCard { preset: modelData; number: index + 1 }
+            // Four presets show at a time; the rest scroll, so the panel keeps its height.
+            Flickable {
+              id: presetFlick
+              // Fewer on short screens, so the panel itself never needs to scroll.
+              readonly property int shown: panel.availableCardHeight > 0 && panel.availableCardHeight < Style.space(900) ? 2 : 4
+              readonly property bool scrolls: presetRepeater.count > shown
+              width: parent.width
+              height: {
+                presetColumn.implicitHeight  // re-evaluate when cards resize
+                if (!scrolls) return presetColumn.implicitHeight
+                var cut = presetRepeater.itemAt(shown)
+                return cut ? cut.y - presetColumn.spacing : presetColumn.implicitHeight
+              }
+              contentWidth: width
+              contentHeight: presetColumn.implicitHeight
+              clip: true
+              boundsBehavior: Flickable.StopAtBounds
+              flickableDirection: Flickable.VerticalFlick
+              interactive: scrolls
+              QQC.ScrollBar.vertical: QQC.ScrollBar { id: presetScroll; policy: presetFlick.scrolls ? QQC.ScrollBar.AlwaysOn : QQC.ScrollBar.AlwaysOff }
+
+              Connections {
+                target: root
+                function onPresetsOpenChanged() { if (root.presetsOpen) Qt.callLater(presetFlick.reveal, root.preset) }
+                function onPresetChanged() { if (root.presetsOpen) Qt.callLater(presetFlick.reveal, root.preset) }
+              }
+              // Bring a preset's card into view (the active one when the list opens).
+              function reveal(id) {
+                for (var i = 0; i < presetRepeater.count; i++) {
+                  var c = presetRepeater.itemAt(i)
+                  if (!c || c.preset.id !== id) continue
+                  if (c.y < contentY) contentY = c.y
+                  else if (c.y + c.height > contentY + height) contentY = Math.min(c.y + c.height - height, contentHeight - height)
+                  return
+                }
+              }
+
+              Column {
+                id: presetColumn
+                width: presetFlick.width - (presetFlick.scrolls ? presetScroll.width + Style.space(6) : 0)
+                spacing: Style.space(6)
+                Repeater {
+                  id: presetRepeater
+                  model: root.presets
+                  delegate: PresetCard { preset: modelData; number: index + 1 }
+                }
+              }
             }
             Caption {
               width: parent.width
-              text: "Keys 1–" + root.presets.length + " switch, P opens or closes this list."
+              text: "Keys 1–" + Math.min(root.presets.length, 9) + " switch, P hides this list."
             }
           }
           Button {
